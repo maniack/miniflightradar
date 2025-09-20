@@ -109,7 +109,7 @@ const App: React.FC = () => {
                 type="text"
                 placeholder="e.g. AAL100"
                 value={callsign}
-                onChange={(e) => setCallsign(e.target.value.toUpperCase())}
+                onChange={(e) => setCallsign(e.target.value.trim().toUpperCase())}
               />
             </div>
             <button className="button search-btn" type="submit" disabled={!canSearch} aria-label="Search">
@@ -149,7 +149,7 @@ const App: React.FC = () => {
           baseMode={baseMode}
           locateToken={locateToken}
           onSelectCallsign={(cs) => {
-            const up = (cs || '').toString().toUpperCase();
+            const up = (cs || '').toString().trim().toUpperCase();
             setCallsign(up);
             setSearchToken((x) => x + 1);
             setURLCallsign(up, false);

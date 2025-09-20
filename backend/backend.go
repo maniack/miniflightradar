@@ -383,7 +383,9 @@ func FlightsInBBoxHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(pts)
 }
 
-// TrackHandler returns historical track for callsign from storage
+// TrackHandler returns the current flight segment track for the given callsign.
+// It avoids merging separate flights under the same callsign by trimming history
+// to the most recent continuous segment for the (icao24 + callsign) pair.
 func TrackHandler(w http.ResponseWriter, r *http.Request) {
 	callsignRaw := r.URL.Query().Get("callsign")
 	if strings.TrimSpace(callsignRaw) == "" {
@@ -391,11 +393,47 @@ func TrackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	callsign := normalizeCallsign(callsignRaw)
+
 	pts, icao, err := storage.Get().TrackByCallsign(callsign, 0)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// Filter by exact callsign to avoid mixing with other identifiers
+	filtered := make([]storage.Point, 0, len(pts))
+	for _, p := range pts {
+		if normalizeCallsign(p.Callsign) == callsign {
+			filtered = append(filtered, p)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = pts // fallback if callsign not present in history
+	}
+	// Walk backwards to find the start of the current flight segment.
+	// We split on:
+	// - long time gap (e.g., > 45 minutes), or
+	// - both samples near-stationary on the ground for a while (dt > 5 minutes and ~0 speed, tiny alt change)
+	start := 0
+	if n := len(filtered); n >= 2 {
+		start = 0
+		for i := n - 2; i >= 0; i-- {
+			dt := filtered[i+1].TS - filtered[i].TS
+			if dt > int64(45*time.Minute/time.Second) {
+				start = i + 1
+				break
+			}
+			// ground idle split heuristic
+			if dt > int64(5*time.Minute/time.Second) {
+				sp1 := filtered[i].Speed
+				sp2 := filtered[i+1].Speed
+				if sp1 <= 1.5 && sp2 <= 1.5 && math.Abs(filtered[i+1].Alt-filtered[i].Alt) < 20 {
+					start = i + 1
+					break
+				}
+			}
+		}
+	}
+
 	resp := struct {
 		Callsign string          `json:"callsign"`
 		Icao24   string          `json:"icao24"`
@@ -403,7 +441,7 @@ func TrackHandler(w http.ResponseWriter, r *http.Request) {
 	}{
 		Callsign: callsign,
 		Icao24:   icao,
-		Points:   pts,
+		Points:   filtered[start:],
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

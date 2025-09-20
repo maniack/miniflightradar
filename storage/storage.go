@@ -122,6 +122,7 @@ func (s *Store) UpsertStates(states [][]interface{}) error {
 				continue
 			}
 			icao, _ := st[0].(string)
+			icao = normalizeICAO(icao)
 			if icao == "" {
 				continue
 			}
@@ -132,6 +133,9 @@ func (s *Store) UpsertStates(states [][]interface{}) error {
 			if !lok || !aok || math.IsNaN(lon) || math.IsNaN(lat) {
 				continue
 			}
+			// Clamp coordinates to valid ranges
+			lon = clamp(lon, -180, 180)
+			lat = clamp(lat, -90, 90)
 			var ts int64
 			if v, ok := toInt64(st[4]); ok && v > 0 {
 				ts = v
@@ -148,13 +152,19 @@ func (s *Store) UpsertStates(states [][]interface{}) error {
 			} else if v, ok := toFloat(st[7]); ok {
 				alt = v
 			}
+			if math.IsNaN(alt) || math.IsInf(alt, 0) || alt < 0 {
+				alt = 0
+			}
 			var track float64
 			if v, ok := toFloat(st[10]); ok {
-				track = v
+				track = normAngle360(v)
 			}
 			var speed float64
 			if v, ok := toFloat(st[9]); ok {
 				speed = v // m/s per OpenSky
+				if math.IsNaN(speed) || math.IsInf(speed, 0) || speed < 0 {
+					speed = 0
+				}
 			}
 			p := Point{Icao24: icao, Callsign: callsign, Lon: lon, Lat: lat, Alt: alt, Track: track, Speed: speed, TS: ts}
 			b, _ := json.Marshal(p)
@@ -265,7 +275,11 @@ func (s *Store) CurrentInBBox(minLon, minLat, maxLon, maxLat float64) ([]Point, 
 	// Filter out flights that have likely landed (stable alt/speed/position over time window)
 	out := make([]Point, 0, len(pts))
 	for _, p := range pts {
-		landed, _ := s.IsLandedWithin(p.Icao24, 15*time.Minute)
+		// Quick filter: if current reported speed is essentially zero, hide in browse mode
+		if p.Speed <= 0.5 { // m/s ~ 1.9 km/h
+			continue
+		}
+		landed, _ := s.IsLandedWithin(p.Icao24, 10*time.Minute)
 		if landed {
 			continue
 		}
@@ -375,4 +389,36 @@ func toInt64(v interface{}) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// normalizeICAO converts ICAO24 hex to lower-case and trims spaces.
+func normalizeICAO(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// clamp limits v into [min,max]; NaN/Inf return 0.
+func clamp(v, min, max float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
+// normAngle360 normalizes angle to [0,360).
+func normAngle360(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	r := math.Mod(v, 360)
+	if r < 0 {
+		r += 360
+	}
+	if r == 360 {
+		r = 0
+	}
+	return r
 }

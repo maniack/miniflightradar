@@ -47,7 +47,6 @@ func Run(ctx context.Context, c *cli.Command) error {
 
 	stop := make(chan struct{})
 	go backend.IngestLoop(stop)
-	defer close(stop)
 
 	r := chi.NewRouter()
 	// Use Recoverer early to ensure panics are caught
@@ -89,5 +88,37 @@ func Run(ctx context.Context, c *cli.Command) error {
 		WriteTimeout:      20 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
-	return srv.ListenAndServe()
+
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case <-ctx.Done():
+		log.Printf("Shutdown signal received, shutting down...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+		// Stop background ingestion
+		close(stop)
+		// Wait for the server goroutine to exit
+		<-errCh
+		// Close storage if opened
+		if s := storage.Get(); s != nil {
+			_ = s.Close()
+		}
+		return nil
+	case err := <-errCh:
+		// Server exited (error or nil). Stop ingestor and close storage.
+		close(stop)
+		if s := storage.Get(); s != nil {
+			_ = s.Close()
+		}
+		return err
+	}
 }
