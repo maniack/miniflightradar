@@ -263,13 +263,22 @@ func IngestLoop(stop <-chan struct{}) {
 			data, err := FetchOpenSkyData()
 			if err != nil {
 				if rl, ok := err.(*RateLimitError); ok {
-					monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s", rl.Status, rl.RetryAfter)
+					// Respect server-provided Retry-After but never less than our polling interval
+					delay := rl.RetryAfter
+					min := GetPollInterval()
+					if min <= 0 {
+						min = 10 * time.Second
+					}
+					if delay < min {
+						delay = min
+					}
+					monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s applied_backoff=%s", rl.Status, rl.RetryAfter, delay)
 					// Extend TTL for current positions so markers don't disappear while backing off
 					if s := storage.Get(); s != nil {
 						buf := 5 * time.Second
-						_ = s.TouchNow(rl.RetryAfter + buf)
+						_ = s.TouchNow(delay + buf)
 					}
-					sleep = rl.RetryAfter
+					sleep = delay
 					continue
 				}
 				monitoring.Debugf("ingestor fetch error: %v", err)
