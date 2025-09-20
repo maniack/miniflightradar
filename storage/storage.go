@@ -243,13 +243,14 @@ func (s *Store) TrackByCallsign(callsign string, limit int) ([]Point, string, er
 	return pts, icao, nil
 }
 
-// CurrentInBBox returns latest points inside [minLon,minLat,maxLon,maxLat].
+// CurrentInBBox returns latest non-landed points inside [minLon,minLat,maxLon,maxLat].
 func (s *Store) CurrentInBBox(minLon, minLat, maxLon, maxLat float64) ([]Point, error) {
 	if s == nil {
 		return nil, errors.New("store not initialized")
 	}
 	pts := []Point{}
-	s.db.View(func(tx *buntdb.Tx) error {
+	// Collect current points within bbox
+	_ = s.db.View(func(tx *buntdb.Tx) error {
 		_ = tx.AscendKeys("now:*", func(key, val string) bool {
 			var p Point
 			if json.Unmarshal([]byte(val), &p) == nil {
@@ -261,7 +262,85 @@ func (s *Store) CurrentInBBox(minLon, minLat, maxLon, maxLat float64) ([]Point, 
 		})
 		return nil
 	})
-	return pts, nil
+	// Filter out flights that have likely landed (stable alt/speed/position over time window)
+	out := make([]Point, 0, len(pts))
+	for _, p := range pts {
+		landed, _ := s.IsLandedWithin(p.Icao24, 15*time.Minute)
+		if landed {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// IsLandedWithin reports whether the aircraft for given ICAO has been effectively stationary
+// (on the ground) within the provided time window. The heuristic checks that over the window:
+// - time span covers at least half the window,
+// - geographic displacement is small,
+// - last recorded speed is near zero,
+// - altitude change is minimal.
+func (s *Store) IsLandedWithin(icao string, window time.Duration) (bool, error) {
+	if s == nil {
+		return false, errors.New("store not initialized")
+	}
+	if window <= 0 {
+		window = 15 * time.Minute
+	}
+	var newest *Point
+	var oldest *Point
+	err := s.db.View(func(tx *buntdb.Tx) error {
+		prefix := fmt.Sprintf("pos:%s:", icao)
+		cutoff := time.Now().Add(-window).Unix()
+		count := 0
+		_ = tx.DescendKeys(prefix+"*", func(key, val string) bool {
+			var p Point
+			if json.Unmarshal([]byte(val), &p) != nil {
+				return true
+			}
+			if newest == nil {
+				newest = &p
+			}
+			oldest = &p
+			count++
+			if p.TS < cutoff || count >= 10 {
+				return false
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if newest == nil || oldest == nil {
+		return false, nil
+	}
+	span := newest.TS - oldest.TS
+	if span < int64((window/time.Second)/2) {
+		// Not enough history to decide
+		return false, nil
+	}
+	altDiff := math.Abs(newest.Alt - oldest.Alt)
+	dist := haversineMeters(oldest.Lat, oldest.Lon, newest.Lat, newest.Lon)
+	// consider landed if last speed ~0, tiny movement and nearly no alt change
+	if newest.Speed <= 1.5 && dist < 500 && altDiff < 10 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// haversineMeters returns great-circle distance between two lat/lon points in meters.
+func haversineMeters(lat1, lon1, lat2, lon2 float64) float64 {
+	const R = 6371000.0 // meters
+	toRad := func(d float64) float64 { return d * math.Pi / 180 }
+	dLat := toRad(lat2 - lat1)
+	dLon := toRad(lon2 - lon1)
+	la1 := toRad(lat1)
+	la2 := toRad(lat2)
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Sin(dLon/2)*math.Sin(dLon/2)*math.Cos(la1)*math.Cos(la2)
+	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+	return R * c
 }
 
 func normalizeCallsign(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }

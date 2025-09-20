@@ -351,7 +351,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
 
-    const ensurePoint = (lon: number, lat: number, callsignVal?: string, alt?: number, trackDeg?: number, speedMs?: number) => {
+    const ensurePoint = (lon: number, lat: number, callsignVal?: string, alt?: number, trackDeg?: number, speedMs?: number, tsSec?: number) => {
       let f = flightFeatureRef.current;
       const to = fromLonLat([lon, lat]);
       const rot = typeof trackDeg === 'number' ? (trackDeg * Math.PI / 180) : (lastTrackDegRef.current * Math.PI / 180);
@@ -370,6 +370,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         if (callsignVal) f.set('callsign', callsignVal);
         if (typeof alt === 'number') f.set('alt', alt);
         if (typeof speedMs === 'number') f.set('speed', speedMs);
+        if (typeof tsSec === 'number') f.set('ts', tsSec);
         f.set('lat', lat);
         f.set('lon', lon);
         if (typeof trackDeg === 'number') f.set('track', trackDeg);
@@ -391,6 +392,9 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
           f.set('track', trackDeg);
           f.setStyle(getPointStyle(theme, rot));
         }
+        if (typeof tsSec === 'number') {
+          f.set('ts', tsSec);
+        }
         if (dist2 < 1) {
           // very small movement, snap
           geom.setCoordinates(to);
@@ -401,17 +405,23 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         animFromRef.current = from as [number, number];
         animToRef.current = to as [number, number];
         animStartRef.current = performance.now();
-        // Duration based on distance and speed to keep motion physically plausible
+        // Prefer real time delta between samples if available, otherwise fall back to distance/speed
         let durationMs = 800;
-        const fromXY = animFromRef.current!;
-        const toXY = animToRef.current!;
-        const ddx = toXY[0] - fromXY[0];
-        const ddy = toXY[1] - fromXY[1];
-        const distMeters = Math.sqrt(ddx * ddx + ddy * ddy);
-        const spd = (typeof speedMs === 'number' && speedMs > 0) ? speedMs : (Number(f.get('speed')) || 0);
-        if (spd > 0) {
-          // Clamp to sane range so UI stays responsive
-          durationMs = Math.max(300, Math.min(12000, (distMeters / spd) * 1000));
+        const prevTs = Number((f.get('ts') as number) || 0);
+        const curTs = typeof tsSec === 'number' ? tsSec : prevTs;
+        let dtSec = prevTs > 0 && curTs > prevTs ? (curTs - prevTs) : 0;
+        if (dtSec > 0) {
+          durationMs = Math.max(200, Math.min(15000, dtSec * 1000));
+        } else {
+          const fromXY = animFromRef.current!;
+          const toXY = animToRef.current!;
+          const ddx = toXY[0] - fromXY[0];
+          const ddy = toXY[1] - fromXY[1];
+          const distMeters = Math.sqrt(ddx * ddx + ddy * ddy);
+          const spd = (typeof speedMs === 'number' && speedMs > 0) ? speedMs : (Number(f.get('speed')) || 0);
+          if (spd > 0) {
+            durationMs = Math.max(300, Math.min(12000, (distMeters / spd) * 1000));
+          }
         }
         const step = (now: number) => {
           const start = animStartRef.current;
@@ -470,7 +480,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         setFullTrack(lonlats);
         const cur = pts[idx];
         if (typeof cur?.track === 'number') { lastTrackDegRef.current = cur.track; }
-        ensurePoint(cur.lon, cur.lat, callsign, cur.alt, cur.track, typeof cur?.speed === 'number' ? cur.speed : undefined);
+        ensurePoint(cur.lon, cur.lat, callsign, cur.alt, cur.track, typeof cur?.speed === 'number' ? cur.speed : undefined, typeof cur?.ts === 'number' ? cur.ts : undefined);
         recenter(cur.lon, cur.lat);
       } catch (e) {
         console.debug('[FlightMap] track error', e);
@@ -534,7 +544,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
 
-    const animateMove = (feat: Feature<Point>, to: [number, number]) => {
+    const animateMove = (feat: Feature<Point>, to: [number, number], dtSec?: number) => {
       const anyFeat = feat as any;
       if (anyFeat.__animHandle) {
         cancelAnimationFrame(anyFeat.__animHandle);
@@ -549,12 +559,17 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         geom.setCoordinates(to);
         return;
       }
-      // Duration based on distance and reported speed (m/s)
+      // Prefer duration based on real timestamp delta if provided
       let durationMs = 800;
-      const distMeters = Math.sqrt(dist2);
-      const spd = Number(feat.get('speed'));
-      if (!isNaN(spd) && spd > 0) {
-        durationMs = Math.max(300, Math.min(10000, (distMeters / spd) * 1000));
+      if (typeof dtSec === 'number' && dtSec > 0) {
+        durationMs = Math.max(200, Math.min(15000, dtSec * 1000));
+      } else {
+        // Fallback: based on distance and reported speed (m/s)
+        const distMeters = Math.sqrt(dist2);
+        const spd = Number(feat.get('speed'));
+        if (!isNaN(spd) && spd > 0) {
+          durationMs = Math.max(300, Math.min(10000, (distMeters / spd) * 1000));
+        }
       }
       const start = performance.now();
       const step = (now: number) => {
