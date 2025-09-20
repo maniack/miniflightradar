@@ -1,4 +1,9 @@
 /* Global resets and CSS variables for theming */
+:root {
+  --control-gap: 8px;
+  --fab-size: 48px;
+  --control-margin: 16px;
+}
 :root[data-theme='light'] {
   --bg: #ffffff;
   --bg-elev: #f5f7fb;
@@ -126,7 +131,7 @@ body {
   z-index: 1100;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--control-gap);
 }
 .fab-btn {
   width: 48px;
@@ -145,12 +150,16 @@ body {
 /* Reposition and restyle OpenLayers zoom control to match FAB buttons */
 .ol-zoom {
   right: 16px !important;
-  bottom: 120px !important; /* above br-controls */
+  bottom: calc(var(--control-margin) + (2 * var(--fab-size) + var(--control-gap)) + var(--control-gap)) !important; /* equal gap to br-controls */
   left: auto !important;
   top: auto !important;
   display: flex !important;
   flex-direction: column !important;
-  gap: 8px !important;
+  gap: var(--control-gap) !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
 }
 .ol-zoom button {
   width: 48px !important;

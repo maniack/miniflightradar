@@ -12,8 +12,14 @@ const App: React.FC = () => {
     const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
     return prefersDark ? 'dark' : 'light';
   });
-  // Map base mode: 'osm' follows theme (light/dark), 'sat' is satellite imagery
-  const [baseMode, setBaseMode] = useState<'osm' | 'sat'>(() => (localStorage.getItem('baseMode') as 'osm' | 'sat') || 'osm');
+  // Map base mode: 'osm' follows theme (light/dark), 'hyb' is hybrid imagery with labels
+  const [baseMode, setBaseMode] = useState<'osm' | 'hyb'>(() => {
+    const stored = localStorage.getItem('baseMode');
+    if (stored === 'hyb') return 'hyb';
+    // migrate old 'sat' to 'hyb'
+    if (stored === 'sat') return 'hyb';
+    return 'osm';
+  });
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -63,12 +69,12 @@ const App: React.FC = () => {
               <span>OSM</span>
             </button>
             <button
-              className={`chip ${baseMode === 'sat' ? 'active' : ''}`}
-              onClick={() => setBaseMode('sat')}
-              title="Satellite"
+              className={`chip ${baseMode === 'hyb' ? 'active' : ''}`}
+              onClick={() => setBaseMode('hyb')}
+              title="Hybrid (Imagery + Labels)"
             >
-              <i className="fa-solid fa-globe"></i>
-              <span>Sat</span>
+              <i className="fa-solid fa-layer-group"></i>
+              <span>Hybrid</span>
             </button>
           </div>
         </div>
@@ -85,8 +91,6 @@ const App: React.FC = () => {
             {theme === 'light' ? <i className="fa-solid fa-moon"></i> : <i className="fa-solid fa-sun"></i>}
           </button>
         </div>
-
-        <div className="info-bar">Type callsign and press Search</div>
       </div>
     </div>
   );

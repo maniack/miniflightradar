@@ -15,7 +15,7 @@ interface FlightMapProps {
   callsign: string;
   searchToken: number;
   theme: 'light' | 'dark';
-  baseMode: 'osm' | 'sat';
+  baseMode: 'osm' | 'hyb';
   // Token to trigger centering on user's current location
   locateToken?: number;
 }
@@ -25,7 +25,9 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   const vectorSourceRef = useRef<VectorSource>(new VectorSource());
   const baseOSMLightRef = useRef<TileLayer<any> | null>(null);
   const baseOSMDarkRef = useRef<TileLayer<any> | null>(null);
-  const baseSatRef = useRef<TileLayer<any> | null>(null);
+  const baseHybImageryRef = useRef<TileLayer<any> | null>(null);
+  const hybLabelsPlacesRef = useRef<TileLayer<any> | null>(null);
+  const hybLabelsTransportRef = useRef<TileLayer<any> | null>(null);
 
   const centerTo = (lon: number, lat: number, zoom = 8) => {
     if (!mapRef.current) return;
@@ -68,10 +70,27 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       visible: false,
     });
 
-    const sat = new TileLayer({
+    // Hybrid = Esri World Imagery + reference labels overlays
+    const hybImagery = new TileLayer({
       source: new XYZ({
         url: "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        attributions: '© Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+        attributions: '© Esri, Maxar, Earthstar Geographics',
+        crossOrigin: "anonymous",
+      }),
+      visible: false,
+    });
+    const hybLabelsPlaces = new TileLayer({
+      source: new XYZ({
+        url: "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        attributions: '© Esri',
+        crossOrigin: "anonymous",
+      }),
+      visible: false,
+    });
+    const hybLabelsTransport = new TileLayer({
+      source: new XYZ({
+        url: "https://services.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        attributions: '© Esri',
         crossOrigin: "anonymous",
       }),
       visible: false,
@@ -79,11 +98,13 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     baseOSMLightRef.current = osmLight;
     baseOSMDarkRef.current = osmDark;
-    baseSatRef.current = sat;
+    baseHybImageryRef.current = hybImagery;
+    hybLabelsPlacesRef.current = hybLabelsPlaces;
+    hybLabelsTransportRef.current = hybLabelsTransport;
 
     const map = new Map({
       target: "map",
-      layers: [osmLight, osmDark, sat, new VectorLayer({ source: vectorSourceRef.current })],
+      layers: [osmLight, osmDark, hybImagery, hybLabelsPlaces, hybLabelsTransport, new VectorLayer({ source: vectorSourceRef.current })],
       view: new View({
         center: fromLonLat([0, 20]),
         zoom: 2,
@@ -104,16 +125,23 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   useEffect(() => {
     const osmLight = baseOSMLightRef.current;
     const osmDark = baseOSMDarkRef.current;
-    const sat = baseSatRef.current;
-    if (!osmLight || !osmDark || !sat) return;
+    const hyb = baseHybImageryRef.current;
+    const lb1 = hybLabelsPlacesRef.current;
+    const lb2 = hybLabelsTransportRef.current;
+    if (!osmLight || !osmDark || !hyb || !lb1 || !lb2) return;
 
-    if (baseMode === 'sat') {
+    if (baseMode === 'hyb') {
+      // Hybrid on
       osmLight.setVisible(false);
       osmDark.setVisible(false);
-      sat.setVisible(true);
+      hyb.setVisible(true);
+      lb1.setVisible(true);
+      lb2.setVisible(true);
     } else {
       // OSM mode follows theme
-      sat.setVisible(false);
+      hyb.setVisible(false);
+      lb1.setVisible(false);
+      lb2.setVisible(false);
       if (theme === 'dark') {
         osmLight.setVisible(false);
         osmDark.setVisible(true);
