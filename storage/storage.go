@@ -32,6 +32,31 @@ type Store struct {
 	nowTTL    time.Duration
 }
 
+// TouchNow extends the TTL of all current-position keys (now:*) to the provided duration.
+// It keeps the existing values intact while refreshing their expiration.
+// If ttl <= 0, the store's default nowTTL is used.
+func (s *Store) TouchNow(ttl time.Duration) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if ttl <= 0 {
+		ttl = s.nowTTL
+	}
+	return s.db.Update(func(tx *buntdb.Tx) error {
+		keys := make([]string, 0, 1024)
+		_ = tx.AscendKeys("now:*", func(key, val string) bool {
+			keys = append(keys, key)
+			return true
+		})
+		for _, k := range keys {
+			if v, err := tx.Get(k); err == nil {
+				_, _, _ = tx.Set(k, v, &buntdb.SetOptions{Expires: true, TTL: ttl})
+			}
+		}
+		return nil
+	})
+}
+
 var store *Store
 
 // Open opens a persistent BuntDB file on disk and configures retention.
@@ -178,6 +203,11 @@ func (s *Store) UpsertStates(states [][]interface{}) error {
 			if callsign != "" {
 				keyMap := fmt.Sprintf("map:cs:%s", callsign)
 				_, _, _ = tx.Set(keyMap, icao, &buntdb.SetOptions{Expires: true, TTL: s.retention})
+				// Also map alternate airline code form (IATA<->ICAO) if available
+				if alt := convertCallsignAlternate(callsign); alt != "" {
+					keyMapAlt := fmt.Sprintf("map:cs:%s", alt)
+					_, _, _ = tx.Set(keyMapAlt, icao, &buntdb.SetOptions{Expires: true, TTL: s.retention})
+				}
 			}
 		}
 		return nil
@@ -200,7 +230,22 @@ func (s *Store) LatestByCallsign(callsign string) (*Point, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		// Try alternate airline code form (IATA<->ICAO)
+		if alt := convertCallsignAlternate(callsign); alt != "" {
+			_ = s.db.View(func(tx *buntdb.Tx) error {
+				v, e := tx.Get("map:cs:" + alt)
+				if e == nil {
+					icao = v
+					return nil
+				}
+				return e
+			})
+			if icao == "" {
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
 	}
 	var out *Point
 	s.db.View(func(tx *buntdb.Tx) error {
@@ -233,7 +278,22 @@ func (s *Store) TrackByCallsign(callsign string, limit int) ([]Point, string, er
 		return nil
 	})
 	if err != nil {
-		return nil, "", err
+		// Try alternate airline code form (IATA<->ICAO)
+		if alt := convertCallsignAlternate(callsign); alt != "" {
+			_ = s.db.View(func(tx *buntdb.Tx) error {
+				v, e := tx.Get("map:cs:" + alt)
+				if e == nil {
+					icao = v
+					return nil
+				}
+				return e
+			})
+			if icao == "" {
+				return nil, "", err
+			}
+		} else {
+			return nil, "", err
+		}
 	}
 	pts := make([]Point, 0, 256)
 	s.db.View(func(tx *buntdb.Tx) error {
@@ -272,13 +332,10 @@ func (s *Store) CurrentInBBox(minLon, minLat, maxLon, maxLat float64) ([]Point, 
 		})
 		return nil
 	})
-	// Filter out flights that have likely landed (stable alt/speed/position over time window)
+	// Filter out flights that have likely landed using historical heuristic.
+	// Do not hide aircraft solely based on current speed value, as many samples may lack speed or report it as 0.
 	out := make([]Point, 0, len(pts))
 	for _, p := range pts {
-		// Quick filter: if current reported speed is essentially zero, hide in browse mode
-		if p.Speed <= 0.5 { // m/s ~ 1.9 km/h
-			continue
-		}
 		landed, _ := s.IsLandedWithin(p.Icao24, 10*time.Minute)
 		if landed {
 			continue
@@ -421,4 +478,107 @@ func normAngle360(v float64) float64 {
 		r = 0
 	}
 	return r
+}
+
+// --- Airline code mapping and callsign conversion helpers ---
+
+// iataToIcao maps common airline IATA (2-letter) codes to ICAO (3-letter) codes.
+// This is a curated subset sufficient for most use cases; extend as needed.
+var iataToIcao = map[string]string{
+	"AA": "AAL", // American Airlines
+	"DL": "DAL", // Delta Air Lines
+	"UA": "UAL", // United Airlines
+	"AS": "ASA", // Alaska Airlines
+	"B6": "JBU", // JetBlue Airways
+	"NK": "NKS", // Spirit Airlines
+	"F9": "FFT", // Frontier Airlines
+	"G4": "AAY", // Allegiant Air
+	"WS": "WJA", // WestJet
+	"AC": "ACA", // Air Canada
+	"AF": "AFR", // Air France
+	"KL": "KLM", // KLM Royal Dutch Airlines
+	"BA": "BAW", // British Airways
+	"LH": "DLH", // Lufthansa
+	"LX": "SWR", // SWISS
+	"OS": "AUA", // Austrian Airlines
+	"SN": "BEL", // Brussels Airlines
+	"IB": "IBE", // Iberia
+	"VY": "VLG", // Vueling
+	"TP": "TAP", // TAP Air Portugal
+	"AZ": "ITY", // ITA Airways
+	"FR": "RYR", // Ryanair
+	"U2": "EZY", // easyJet UK
+	"W6": "WZZ", // Wizz Air
+	"TK": "THY", // Turkish Airlines
+	"EK": "UAE", // Emirates
+	"QR": "QTR", // Qatar Airways
+	"EY": "ETD", // Etihad Airways
+	"FZ": "FDB", // flydubai
+	"SU": "AFL", // Aeroflot Russian Airlines
+	"S7": "SBI", // S7 Airlines
+	"U6": "SVR", // Ural Airlines
+	"UT": "UTA", // UTair
+	"LO": "LOT", // LOT Polish Airlines
+	"SK": "SAS", // Scandinavian Airlines
+	"AY": "FIN", // Finnair
+	"DY": "NOZ", // Norwegian Air Shuttle
+	"BT": "BTI", // airBaltic
+	"A3": "AEE", // Aegean Airlines
+	"CA": "CCA", // Air China
+	"MU": "CES", // China Eastern
+	"CZ": "CSN", // China Southern
+	"NH": "ANA", // All Nippon Airways
+	"JL": "JAL", // Japan Airlines
+	"QF": "QFA", // Qantas
+	"NZ": "ANZ", // Air New Zealand
+	"KE": "KAL", // Korean Air
+	"OZ": "AAR", // Asiana Airlines
+	"ET": "ETH", // Ethiopian Airlines
+	"KQ": "KQA", // Kenya Airways
+	"MS": "MSR", // Egyptair
+	"SV": "SVA", // Saudia
+	"SA": "SAA", // South African Airways
+}
+
+var icaoToIata map[string]string
+
+func init() {
+	icaoToIata = make(map[string]string, len(iataToIcao))
+	for iata, icao := range iataToIcao {
+		icaoToIata[icao] = iata
+	}
+}
+
+// convertCallsignAlternate returns an alternate callsign form with airline code converted
+// between IATA (2-letter) and ICAO (3-letter). If no conversion is possible, returns empty string.
+func convertCallsignAlternate(cs string) string {
+	cs = normalizeCallsign(cs)
+	if cs == "" {
+		return ""
+	}
+	// Extract leading alpha prefix
+	i := 0
+	for i < len(cs) {
+		ch := cs[i]
+		if ch < 'A' || ch > 'Z' {
+			break
+		}
+		i++
+	}
+	if i == 0 {
+		return ""
+	}
+	prefix := cs[:i]
+	suffix := cs[i:]
+	switch len(prefix) {
+	case 2:
+		if icao, ok := iataToIcao[prefix]; ok {
+			return icao + suffix
+		}
+	case 3:
+		if iata, ok := icaoToIata[prefix]; ok {
+			return iata + suffix
+		}
+	}
+	return ""
 }

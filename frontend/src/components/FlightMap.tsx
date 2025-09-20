@@ -19,6 +19,49 @@ import Stroke from "ol/style/Stroke";
 import Icon from "ol/style/Icon";
 import Overlay from "ol/Overlay";
 
+// --- Airline code mapping to derive IATA<->ICAO callsign variants (frontend mirror of backend) ---
+const IATA_TO_ICAO: Record<string, string> = {
+  AA: 'AAL', DL: 'DAL', UA: 'UAL', AS: 'ASA', B6: 'JBU', NK: 'NKS', F9: 'FFT', G4: 'AAY',
+  WS: 'WJA', AC: 'ACA', AF: 'AFR', KL: 'KLM', BA: 'BAW', LH: 'DLH', LX: 'SWR', OS: 'AUA',
+  SN: 'BEL', IB: 'IBE', VY: 'VLG', TP: 'TAP', AZ: 'ITY', FR: 'RYR', U2: 'EZY', W6: 'WZZ',
+  TK: 'THY', EK: 'UAE', QR: 'QTR', EY: 'ETD', FZ: 'FDB', SU: 'AFL', S7: 'SBI', U6: 'SVR',
+  UT: 'UTA', LO: 'LOT', SK: 'SAS', AY: 'FIN', DY: 'NOZ', BT: 'BTI', A3: 'AEE', CA: 'CCA',
+  MU: 'CES', CZ: 'CSN', NH: 'ANA', JL: 'JAL', QF: 'QFA', NZ: 'ANZ', KE: 'KAL', OZ: 'AAR',
+  ET: 'ETH', KQ: 'KQA', MS: 'MSR', SV: 'SVA', SA: 'SAA',
+};
+const ICAO_TO_IATA: Record<string, string> = Object.create(null);
+for (const [iata, icao] of Object.entries(IATA_TO_ICAO)) {
+  ICAO_TO_IATA[icao] = iata;
+}
+
+function normalizeCallsign(cs: any): string {
+  return String(cs || '').trim().toUpperCase();
+}
+
+// Returns alternate callsign with airline code converted IATA<->ICAO; empty if not convertible
+function convertCallsignAlternate(cs: string): string {
+  cs = normalizeCallsign(cs);
+  if (!cs) return '';
+  let i = 0;
+  while (i < cs.length) {
+    const ch = cs.charCodeAt(i);
+    if (ch < 65 || ch > 90) break; // non A-Z
+    i++;
+  }
+  if (i === 0) return '';
+  const prefix = cs.slice(0, i);
+  const suffix = cs.slice(i);
+  if (prefix.length === 2) {
+    const icao = IATA_TO_ICAO[prefix as keyof typeof IATA_TO_ICAO];
+    return icao ? icao + suffix : '';
+  }
+  if (prefix.length === 3) {
+    const iata = ICAO_TO_IATA[prefix];
+    return iata ? iata + suffix : '';
+  }
+  return '';
+}
+
 interface FlightMapProps {
   callsign: string;
   searchToken: number;
@@ -27,9 +70,11 @@ interface FlightMapProps {
   // Token to trigger centering on user's current location
   locateToken?: number;
   onSelectCallsign?: (callsign: string) => void;
+  onNotFound?: (message: string) => void;
+  onFound?: () => void;
 }
 
-const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign }) => {
+const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign, onNotFound, onFound }) => {
   const mapRef = useRef<OlMap | null>(null);
   const vectorSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   // Source/layer for tracked flight + its track (on top)
@@ -214,13 +259,22 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       const alt = props.alt;
       const spd = props.speed; // m/s if present
       const knots = typeof spd === 'number' ? Math.round(spd * 1.94384449) : null;
-      // Only callsign is potentially untrusted string; numbers are formatted explicitly.
-      const csSafe = cs ? esc(cs) : 'Unknown';
+      // Compose title with ICAO callsign and IATA in parentheses when available
+      const csNorm = normalizeCallsign(cs);
+      const altCS = convertCallsignAlternate(csNorm);
+      let titleText: string;
+      if (csNorm) {
+        titleText = esc(csNorm) + (altCS ? ` (${esc(altCS)})` : '');
+      } else if (altCS) {
+        titleText = esc(altCS);
+      } else {
+        titleText = 'Unknown';
+      }
       const latStr = typeof lat === 'number' ? lat.toFixed(4) : '';
       const lonStr = typeof lon === 'number' ? lon.toFixed(4) : '';
       const altStr = typeof alt === 'number' ? `<br/>alt: ${Math.round(alt)} m` : '';
       const spdStr = typeof knots === 'number' ? `<br/>spd: ${knots} kt` : '';
-      el.innerHTML = `<div><strong>${csSafe}</strong><br/>lat: ${latStr}, lon: ${lonStr}${altStr}${spdStr}</div>`;
+      el.innerHTML = `<div><strong>${titleText}</strong><br/>lat: ${latStr}, lon: ${lonStr}${altStr}${spdStr}</div>`;
       el.style.display = 'block';
       ov.setPosition([x, y]);
     };
@@ -460,12 +514,18 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         const resp = await fetch(`/api/track?callsign=${encodeURIComponent(callsign)}`);
         if (!resp.ok) {
           console.debug('[FlightMap] track not ok', resp.status);
+          if (!cancelled) {
+            onNotFound && onNotFound(`Flight "${callsign}" was not found. Try a different flight number. Both IATA and ICAO airline codes are supported.`);
+          }
           return;
         }
         const data = await resp.json();
         if (cancelled) return;
         const pts = Array.isArray(data?.points) ? (data.points as Array<any>) : [];
-        if (!pts.length) return;
+        if (!pts.length) {
+          onNotFound && onNotFound(`Flight "${callsign}" was not found. Try a different flight number. Both IATA and ICAO airline codes are supported.`);
+          return;
+        }
         // Full track (last N for perf)
         const lonlats: [number, number][] = pts.slice(-MAX_TRACK_POINTS).map((p: any) => [p.lon, p.lat]);
         setFullTrack(lonlats);
@@ -477,8 +537,12 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
           recenter(cur.lon, cur.lat);
           flightFeatureRef.current?.set('__centered', true);
         }
+        onFound && onFound();
       } catch (e) {
         console.debug('[FlightMap] track error', e);
+        if (!cancelled) {
+          onNotFound && onNotFound(`Couldn't load flight "${callsign}". Please try again.`);
+        }
       }
     };
 

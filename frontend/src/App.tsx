@@ -6,6 +6,7 @@ const App: React.FC = () => {
   const [callsign, setCallsign] = useState("");
   const [searchToken, setSearchToken] = useState(0);
   const [locateToken, setLocateToken] = useState(0);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('theme');
     if (stored === 'light' || stored === 'dark') return stored;
@@ -21,13 +22,16 @@ const App: React.FC = () => {
     return 'osm';
   });
 
-  // Helper to sync callsign with URL query param
+  // Helper to sync callsign with URL query param (use 'q' in URL; remove legacy 'callsign')
   const setURLCallsign = (cs: string | null, replace = false) => {
     try {
       const url = new URL(window.location.href);
       if (cs && cs.trim()) {
-        url.searchParams.set('callsign', cs.trim().toUpperCase());
+        const up = cs.trim().toUpperCase();
+        url.searchParams.set('q', up);
+        url.searchParams.delete('callsign'); // cleanup legacy param
       } else {
+        url.searchParams.delete('q');
         url.searchParams.delete('callsign');
       }
       const href = url.toString();
@@ -50,15 +54,19 @@ const App: React.FC = () => {
     localStorage.setItem('baseMode', baseMode);
   }, [baseMode]);
 
-  // On initial load, read callsign from URL and auto-trigger search
+  // On initial load, read from URL (?q preferred, fallback to legacy ?callsign) and auto-trigger search
   useEffect(() => {
     try {
       const url = new URL(window.location.href);
-      const cs = url.searchParams.get('callsign');
+      const q = url.searchParams.get('q');
+      const legacy = url.searchParams.get('callsign');
+      const cs = q || legacy;
       if (cs && cs.trim()) {
         const up = cs.trim().toUpperCase();
         setCallsign(up);
         setSearchToken((x) => x + 1);
+        // Migrate legacy param to ?q using replaceState (no history entry)
+        if (!q && legacy) setURLCallsign(up, true);
       }
     } catch (_) {
       // noop
@@ -70,7 +78,9 @@ const App: React.FC = () => {
     const handler = () => {
       try {
         const url = new URL(window.location.href);
-        const cs = url.searchParams.get('callsign');
+        const q = url.searchParams.get('q');
+        const legacy = url.searchParams.get('callsign');
+        const cs = q || legacy || '';
         const up = cs ? cs.trim().toUpperCase() : '';
         setCallsign(up);
         setSearchToken((x) => x + 1);
@@ -84,11 +94,19 @@ const App: React.FC = () => {
 
   const canSearch = useMemo(() => callsign.trim().length > 0, [callsign]);
 
+  const panelColors = useMemo(() => {
+    if (theme === 'dark') {
+      return { bg: '#0b1220cc', fg: '#e5e7eb', border: '#1f2937' };
+    }
+    return { bg: '#ffffffcc', fg: '#111827', border: '#d1d5db' };
+  }, [theme]);
+
   const onSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!canSearch) return;
     const up = callsign.trim().toUpperCase();
     setCallsign(up);
+    setErrorMsg(null);
     setSearchToken((x) => x + 1);
     setURLCallsign(up, false);
   };
@@ -103,13 +121,13 @@ const App: React.FC = () => {
         <div className="controls">
           <form onSubmit={onSubmit} style={{display:'flex',alignItems:'center',gap:8}}>
             <div className="field">
-              <span className="label">Callsign</span>
+              <span className="label">Flight #</span>
               <input
                 className="input"
                 type="text"
                 placeholder="e.g. AAL100"
                 value={callsign}
-                onChange={(e) => setCallsign(e.target.value.trim().toUpperCase())}
+                onChange={(e) => { setErrorMsg(null); setCallsign(e.target.value.trim().toUpperCase()); }}
               />
             </div>
             <button className="button search-btn" type="submit" disabled={!canSearch} aria-label="Search">
@@ -151,10 +169,28 @@ const App: React.FC = () => {
           onSelectCallsign={(cs) => {
             const up = (cs || '').toString().trim().toUpperCase();
             setCallsign(up);
+            setErrorMsg(null);
             setSearchToken((x) => x + 1);
             setURLCallsign(up, false);
           }}
+          onNotFound={(msg) => setErrorMsg(msg)}
+          onFound={() => setErrorMsg(null)}
         />
+
+        {errorMsg && (
+          <div role="alert" aria-live="assertive" style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center', alignItems: 'flex-start', paddingTop: 24, zIndex: 1000, pointerEvents: 'none' }}>
+            <div style={{ background: panelColors.bg, color: panelColors.fg, border: `1px solid ${panelColors.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', maxWidth: 520, width: 'min(92%, 520px)', padding: '12px 14px', pointerEvents: 'auto' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <i className="fa-solid fa-triangle-exclamation"></i>
+                  <strong>Flight not found</strong>
+                </div>
+                <button onClick={() => setErrorMsg(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{errorMsg}</div>
+            </div>
+          </div>
+        )}
 
         {/* Bottom-right controls: locate + theme toggle */}
         <div className="br-controls">

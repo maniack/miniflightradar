@@ -264,10 +264,23 @@ func IngestLoop(stop <-chan struct{}) {
 			if err != nil {
 				if rl, ok := err.(*RateLimitError); ok {
 					monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s", rl.Status, rl.RetryAfter)
+					// Extend TTL for current positions so markers don't disappear while backing off
+					if s := storage.Get(); s != nil {
+						buf := 5 * time.Second
+						_ = s.TouchNow(rl.RetryAfter + buf)
+					}
 					sleep = rl.RetryAfter
 					continue
 				}
 				monitoring.Debugf("ingestor fetch error: %v", err)
+				// On transient error, keep current positions visible until next poll attempt
+				if s := storage.Get(); s != nil {
+					d := GetPollInterval()
+					if d <= 0 {
+						d = 10 * time.Second
+					}
+					_ = s.TouchNow(d + 5*time.Second)
+				}
 				// On error, try again after normal interval
 				sleep = GetPollInterval()
 				if sleep <= 0 {
