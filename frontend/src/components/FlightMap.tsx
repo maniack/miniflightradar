@@ -267,14 +267,15 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     geolocate();
   }, [locateToken]);
 
-  // Track flight with 60s delayed position and draw historical track from backend storage
+  // Track a single flight: draw historical track, and predict current position for continuous motion
   useEffect(() => {
     const source = vectorSourceRef.current;
     let cancelled = false;
     let timer: number | null = null;
+    let rafId: number | null = null;
 
     const MAX_TRACK_POINTS = 100;
-    const VIS_LAG_SEC = 60; // delay displayed position by 60 seconds
+    const MAX_PREDICT_SEC = 90; // do not extrapolate further than this
 
     const planeIconData = (fill: string, stroke: string) => {
       const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -351,20 +352,31 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
 
+    const setAnchor = (f: Feature<Point>, sampleXY: [number, number], trackDeg?: number, speedMs?: number) => {
+      const nowSec = Date.now() / 1000;
+      const geom = f.getGeometry() as Point;
+      const curXY = geom.getCoordinates() as [number, number];
+      // If our predicted position is close to the sample, anchor at current to avoid a jump
+      const dx = sampleXY[0] - curXY[0];
+      const dy = sampleXY[1] - curXY[1];
+      const dist = Math.hypot(dx, dy);
+      const anchorXY = dist < 3000 ? curXY : sampleXY; // 3 km threshold
+      f.set('__anchorX', anchorXY[0]);
+      f.set('__anchorY', anchorXY[1]);
+      f.set('__anchorTs', nowSec);
+      if (typeof trackDeg === 'number') f.set('track', trackDeg);
+      if (typeof speedMs === 'number') f.set('speed', speedMs);
+      // Update style rotation if needed
+      const rot = ((f.get('track') as number) || 0) * Math.PI / 180;
+      f.setStyle(getPointStyle(theme, rot));
+    };
+
     const ensurePoint = (lon: number, lat: number, callsignVal?: string, alt?: number, trackDeg?: number, speedMs?: number, tsSec?: number) => {
       let f = flightFeatureRef.current;
-      const to = fromLonLat([lon, lat]);
+      const sampleXY = fromLonLat([lon, lat]) as [number, number];
       const rot = typeof trackDeg === 'number' ? (trackDeg * Math.PI / 180) : (lastTrackDegRef.current * Math.PI / 180);
-      const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-      const cancelAnim = () => {
-        if (animFrameRef.current) {
-          cancelAnimationFrame(animFrameRef.current);
-          animFrameRef.current = null;
-        }
-      };
       if (!f) {
-        // First time: just place the marker without animation
-        const geom = new Point(to);
+        const geom = new Point(sampleXY);
         f = new Feature<Point>({ geometry: geom });
         f.setStyle(getPointStyle(theme, rot));
         if (callsignVal) f.set('callsign', callsignVal);
@@ -376,70 +388,21 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         if (typeof trackDeg === 'number') f.set('track', trackDeg);
         flightFeatureRef.current = f;
         source.addFeature(f);
+        // Initialize anchor at this sample
+        f.set('__anchorX', sampleXY[0]);
+        f.set('__anchorY', sampleXY[1]);
+        f.set('__anchorTs', Date.now() / 1000);
       } else {
-        // Animate from current to new position
-        const geom = f.getGeometry() as Point;
-        const from = geom.getCoordinates();
-        const dx = to[0] - from[0];
-        const dy = to[1] - from[1];
-        const dist2 = dx * dx + dy * dy;
         // Update meta
         f.set('lat', lat);
         f.set('lon', lon);
         if (typeof alt === 'number') f.set('alt', alt);
         if (typeof speedMs === 'number') f.set('speed', speedMs);
+        if (typeof tsSec === 'number') f.set('ts', tsSec);
         if (typeof trackDeg === 'number') {
-          f.set('track', trackDeg);
-          f.setStyle(getPointStyle(theme, rot));
+          lastTrackDegRef.current = trackDeg;
         }
-        if (typeof tsSec === 'number') {
-          f.set('ts', tsSec);
-        }
-        if (dist2 < 1) {
-          // very small movement, snap
-          geom.setCoordinates(to);
-          cancelAnim();
-          return;
-        }
-        cancelAnim();
-        animFromRef.current = from as [number, number];
-        animToRef.current = to as [number, number];
-        animStartRef.current = performance.now();
-        // Prefer real time delta between samples if available, otherwise fall back to distance/speed
-        let durationMs = 800;
-        const prevTs = Number((f.get('ts') as number) || 0);
-        const curTs = typeof tsSec === 'number' ? tsSec : prevTs;
-        let dtSec = prevTs > 0 && curTs > prevTs ? (curTs - prevTs) : 0;
-        if (dtSec > 0) {
-          durationMs = Math.max(200, Math.min(15000, dtSec * 1000));
-        } else {
-          const fromXY = animFromRef.current!;
-          const toXY = animToRef.current!;
-          const ddx = toXY[0] - fromXY[0];
-          const ddy = toXY[1] - fromXY[1];
-          const distMeters = Math.sqrt(ddx * ddx + ddy * ddy);
-          const spd = (typeof speedMs === 'number' && speedMs > 0) ? speedMs : (Number(f.get('speed')) || 0);
-          if (spd > 0) {
-            durationMs = Math.max(300, Math.min(12000, (distMeters / spd) * 1000));
-          }
-        }
-        const step = (now: number) => {
-          const start = animStartRef.current;
-          const t = Math.min(1, (now - start) / durationMs);
-          const e = easeInOut(t);
-          const fxy = animFromRef.current!;
-          const txy = animToRef.current!;
-          const x = fxy[0] + (txy[0] - fxy[0]) * e;
-          const y = fxy[1] + (txy[1] - fxy[1]) * e;
-          geom.setCoordinates([x, y]);
-          if (t < 1) {
-            animFrameRef.current = requestAnimationFrame(step);
-          } else {
-            animFrameRef.current = null;
-            geom.setCoordinates(txy);
-          }
-        };
-        animFrameRef.current = requestAnimationFrame(step);
+        setAnchor(f, sampleXY, trackDeg, speedMs);
       }
     };
 
@@ -451,10 +414,35 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       v.animate({ center: fromLonLat([lon, lat]), zoom: z, duration: 400 });
     };
 
-    const fetchTrackAndShowLagged = async () => {
+    const predictLoop = () => {
+      if (cancelled) return;
+      const f = flightFeatureRef.current;
+      if (f) {
+        const geom = f.getGeometry() as Point;
+        const ax = Number(f.get('__anchorX'));
+        const ay = Number(f.get('__anchorY'));
+        const ats = Number(f.get('__anchorTs'));
+        const spd = Number(f.get('speed')) || 0;
+        const trackDeg = Number(f.get('track')) || 0;
+        if (isFinite(ax) && isFinite(ay) && isFinite(ats) && spd > 0) {
+          const nowSec = Date.now() / 1000;
+          let dt = Math.max(0, nowSec - ats);
+          if (dt > MAX_PREDICT_SEC) dt = MAX_PREDICT_SEC;
+          const th = (trackDeg * Math.PI) / 180;
+          const dx = Math.sin(th) * spd * dt; // meters east
+          const dy = Math.cos(th) * spd * dt; // meters north
+          const x = ax + dx;
+          const y = ay + dy;
+          geom.setCoordinates([x, y]);
+        }
+      }
+      rafId = requestAnimationFrame(predictLoop);
+    };
+
+    const fetchTrackLive = async () => {
       if (!callsign) return;
       try {
-        console.debug('[FlightMap] track fetch (lagged 60s)', { callsign });
+        console.debug('[FlightMap] track fetch (live)', { callsign });
         const resp = await fetch(`/api/track?callsign=${encodeURIComponent(callsign)}`);
         if (!resp.ok) {
           console.debug('[FlightMap] track not ok', resp.status);
@@ -464,24 +452,17 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         if (cancelled) return;
         const pts = Array.isArray(data?.points) ? (data.points as Array<any>) : [];
         if (!pts.length) return;
-        const nowSec = Math.floor(Date.now() / 1000);
-        const cutoff = nowSec - VIS_LAG_SEC;
-        // Find last point with ts <= cutoff
-        let idx = -1;
-        for (let i = pts.length - 1; i >= 0; i--) {
-          if (typeof pts[i]?.ts === 'number' && pts[i].ts <= cutoff) { idx = i; break; }
-        }
-        if (idx === -1) {
-          // no old-enough point yet; don't move marker
-          return;
-        }
-        // Update track line only up to visible point
-        const lonlats: [number, number][] = pts.slice(0, idx + 1).map((p: any) => [p.lon, p.lat]);
+        // Full track (last N for perf)
+        const lonlats: [number, number][] = pts.slice(-MAX_TRACK_POINTS).map((p: any) => [p.lon, p.lat]);
         setFullTrack(lonlats);
-        const cur = pts[idx];
+        const cur = pts[pts.length - 1];
         if (typeof cur?.track === 'number') { lastTrackDegRef.current = cur.track; }
         ensurePoint(cur.lon, cur.lat, callsign, cur.alt, cur.track, typeof cur?.speed === 'number' ? cur.speed : undefined, typeof cur?.ts === 'number' ? cur.ts : undefined);
-        recenter(cur.lon, cur.lat);
+        // recenter on first success only
+        if (!flightFeatureRef.current?.get('__centered')) {
+          recenter(cur.lon, cur.lat);
+          flightFeatureRef.current?.set('__centered', true);
+        }
       } catch (e) {
         console.debug('[FlightMap] track error', e);
       }
@@ -501,14 +482,16 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       return;
     }
 
-    // Initial and periodic refresh (we always fetch full track but display with 60s lag)
-    fetchTrackAndShowLagged();
-    timer = window.setInterval(() => fetchTrackAndShowLagged(), 12000);
+    // Start prediction loop
+    rafId = requestAnimationFrame(predictLoop);
+    // Initial and periodic refresh (fetch latest samples; prediction loop handles motion)
+    fetchTrackLive();
+    timer = window.setInterval(() => fetchTrackLive(), 12000);
 
     return () => {
       cancelled = true;
       if (timer) window.clearInterval(timer);
-      if (animFrameRef.current) { cancelAnimationFrame(animFrameRef.current); animFrameRef.current = null; }
+      if (rafId) cancelAnimationFrame(rafId);
     };
   }, [callsign, searchToken]);
 
@@ -521,6 +504,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     let timer: number | null = null;
     let cancelled = false;
+    let rafId: number | null = null;
+    const MAX_PREDICT_SEC = 90;
 
     const planeIconData = (fill: string, stroke: string) => {
       const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -542,50 +527,43 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     };
     layer.setStyle(styleFn as any);
 
-    const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-
-    const animateMove = (feat: Feature<Point>, to: [number, number], dtSec?: number) => {
-      const anyFeat = feat as any;
-      if (anyFeat.__animHandle) {
-        cancelAnimationFrame(anyFeat.__animHandle);
-        anyFeat.__animHandle = null;
-      }
+    const setAnchor = (feat: Feature<Point>, sampleXY: [number, number], trackDeg?: number, speedMs?: number) => {
+      const nowSec = Date.now() / 1000;
       const geom = feat.getGeometry() as Point;
-      const from = geom.getCoordinates() as [number, number];
-      const dx = to[0] - from[0];
-      const dy = to[1] - from[1];
-      const dist2 = dx * dx + dy * dy;
-      if (dist2 < 1) { // ~ <1m, snap
-        geom.setCoordinates(to);
-        return;
-      }
-      // Prefer duration based on real timestamp delta if provided
-      let durationMs = 800;
-      if (typeof dtSec === 'number' && dtSec > 0) {
-        durationMs = Math.max(200, Math.min(15000, dtSec * 1000));
-      } else {
-        // Fallback: based on distance and reported speed (m/s)
-        const distMeters = Math.sqrt(dist2);
-        const spd = Number(feat.get('speed'));
-        if (!isNaN(spd) && spd > 0) {
-          durationMs = Math.max(300, Math.min(10000, (distMeters / spd) * 1000));
+      const curXY = geom.getCoordinates() as [number, number];
+      const dx = sampleXY[0] - curXY[0];
+      const dy = sampleXY[1] - curXY[1];
+      const dist = Math.hypot(dx, dy);
+      const anchorXY = dist < 3000 ? curXY : sampleXY; // 3 km threshold
+      feat.set('__anchorX', anchorXY[0]);
+      feat.set('__anchorY', anchorXY[1]);
+      feat.set('__anchorTs', nowSec);
+      if (typeof trackDeg === 'number') feat.set('track', trackDeg);
+      if (typeof speedMs === 'number') feat.set('speed', speedMs);
+    };
+
+    const predictLoop = () => {
+      if (cancelled) return;
+      for (const [, feat] of allIndexRef.current.entries()) {
+        const geom = feat.getGeometry() as Point;
+        const ax = Number(feat.get('__anchorX'));
+        const ay = Number(feat.get('__anchorY'));
+        const ats = Number(feat.get('__anchorTs'));
+        const spd = Number(feat.get('speed')) || 0;
+        const trackDeg = Number(feat.get('track')) || 0;
+        if (isFinite(ax) && isFinite(ay) && isFinite(ats) && spd > 0) {
+          const nowSec = Date.now() / 1000;
+          let dt = Math.max(0, nowSec - ats);
+          if (dt > MAX_PREDICT_SEC) dt = MAX_PREDICT_SEC;
+          const th = (trackDeg * Math.PI) / 180;
+          const dx = Math.sin(th) * spd * dt;
+          const dy = Math.cos(th) * spd * dt;
+          const x = ax + dx;
+          const y = ay + dy;
+          geom.setCoordinates([x, y]);
         }
       }
-      const start = performance.now();
-      const step = (now: number) => {
-        const t = Math.min(1, (now - start) / durationMs);
-        const e = easeInOut(t);
-        const x = from[0] + dx * e;
-        const y = from[1] + dy * e;
-        geom.setCoordinates([x, y]);
-        if (t < 1 && !cancelled) {
-          anyFeat.__animHandle = requestAnimationFrame(step);
-        } else {
-          anyFeat.__animHandle = null;
-          geom.setCoordinates(to);
-        }
-      };
-      anyFeat.__animHandle = requestAnimationFrame(step);
+      rafId = requestAnimationFrame(predictLoop);
     };
 
     const fetchAll = async () => {
@@ -609,31 +587,30 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
           if (!id) continue;
           seen.add(id);
           let feat = allIndexRef.current.get(id);
-          const to = fromLonLat([p.lon, p.lat]) as [number, number];
+          const sampleXY = fromLonLat([p.lon, p.lat]) as [number, number];
           if (!feat) {
-            feat = new Feature<Point>({ geometry: new Point(to) });
+            feat = new Feature<Point>({ geometry: new Point(sampleXY) });
             feat.set('icao24', p.icao24 || '');
             feat.set('callsign', p.callsign || '');
             source.addFeature(feat);
             allIndexRef.current.set(id, feat);
+            // initialize anchor
+            feat.set('__anchorX', sampleXY[0]);
+            feat.set('__anchorY', sampleXY[1]);
+            feat.set('__anchorTs', Date.now() / 1000);
           }
-          // Update properties
+          // Update properties (sampled)
           feat.set('lat', p.lat);
           feat.set('lon', p.lon);
           if (typeof p.alt === 'number') feat.set('alt', p.alt); else feat.unset('alt', true);
           if (typeof p.track === 'number') feat.set('track', p.track); else feat.unset('track', true);
           if (typeof p.speed === 'number') feat.set('speed', p.speed); else feat.unset('speed', true);
-          // Animate to new position
-          animateMove(feat, to);
+          // Update anchor based on new sample
+          setAnchor(feat, sampleXY, p.track, p.speed);
         }
         // Remove features not seen in this update
         for (const [id, feat] of allIndexRef.current.entries()) {
           if (!seen.has(id)) {
-            const anyFeat = feat as any;
-            if (anyFeat.__animHandle) {
-              cancelAnimationFrame(anyFeat.__animHandle);
-              anyFeat.__animHandle = null;
-            }
             source.removeFeature(feat);
             allIndexRef.current.delete(id);
           }
@@ -648,6 +625,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     const onMoveEnd = () => { if (!callsign) fetchAll(); };
     map.on('moveend', onMoveEnd);
+    // Start prediction loop
+    rafId = requestAnimationFrame(predictLoop);
     // initial and periodic refresh
     fetchAll();
     timer = window.setInterval(() => fetchAll(), 12000);
@@ -656,11 +635,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       cancelled = true;
       map.un('moveend', onMoveEnd as any);
       if (timer) window.clearInterval(timer);
-      // cancel any running animations
-      for (const [, feat] of allIndexRef.current.entries()) {
-        const anyFeat = feat as any;
-        if (anyFeat.__animHandle) cancelAnimationFrame(anyFeat.__animHandle);
-      }
+      if (rafId) cancelAnimationFrame(rafId);
     };
   }, [callsign, theme]);
 
