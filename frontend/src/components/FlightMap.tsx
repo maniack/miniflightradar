@@ -190,14 +190,21 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         return;
       }
       const props: any = feat.getProperties();
-      const g = feat.getGeometry() as Point;
-      if (!g) return;
+      const geom = feat.getGeometry();
+      if (!geom || typeof (geom as any).getType !== 'function' || (geom as any).getType() !== 'Point') {
+        el.style.display = 'none';
+        ov.setPosition(undefined as any);
+        return;
+      }
+      const g = geom as Point;
       const [x, y] = g.getCoordinates();
       const cs = props.callsign || props.CALLSIGN || '';
       const lat = props.lat ?? props.latitude;
       const lon = props.lon ?? props.longitude;
       const alt = props.alt;
-      el.innerHTML = `<div><strong>${cs || 'Unknown'}</strong><br/>lat: ${typeof lat==='number'?lat.toFixed(4):''}, lon: ${typeof lon==='number'?lon.toFixed(4):''}${typeof alt==='number'?`<br/>alt: ${Math.round(alt)} m`:''}</div>`;
+      const spd = props.speed; // m/s if present
+      const knots = typeof spd === 'number' ? Math.round(spd * 1.94384449) : null;
+      el.innerHTML = `<div><strong>${cs || 'Unknown'}</strong><br/>lat: ${typeof lat==='number'?lat.toFixed(4):''}, lon: ${typeof lon==='number'?lon.toFixed(4):''}${typeof alt==='number'?`<br/>alt: ${Math.round(alt)} m`:''}${typeof knots==='number'?`<br/>spd: ${knots} kt`:''}</div>`;
       el.style.display = 'block';
       ov.setPosition([x, y]);
     };
@@ -258,13 +265,14 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     geolocate();
   }, [locateToken]);
 
-  // Track flight in real time and draw historical track from backend storage
+  // Track flight with 60s delayed position and draw historical track from backend storage
   useEffect(() => {
     const source = vectorSourceRef.current;
     let cancelled = false;
     let timer: number | null = null;
 
     const MAX_TRACK_POINTS = 100;
+    const VIS_LAG_SEC = 60; // delay displayed position by 60 seconds
 
     const planeIconData = (fill: string, stroke: string) => {
       const svg = `<?xml version="1.0" encoding="UTF-8"?>
@@ -341,7 +349,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
 
-    const ensurePoint = (lon: number, lat: number, callsignVal?: string, alt?: number, trackDeg?: number) => {
+    const ensurePoint = (lon: number, lat: number, callsignVal?: string, alt?: number, trackDeg?: number, speedMs?: number) => {
       let f = flightFeatureRef.current;
       const to = fromLonLat([lon, lat]);
       const rot = typeof trackDeg === 'number' ? (trackDeg * Math.PI / 180) : (lastTrackDegRef.current * Math.PI / 180);
@@ -359,6 +367,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         f.setStyle(getPointStyle(theme, rot));
         if (callsignVal) f.set('callsign', callsignVal);
         if (typeof alt === 'number') f.set('alt', alt);
+        if (typeof speedMs === 'number') f.set('speed', speedMs);
         f.set('lat', lat);
         f.set('lon', lon);
         if (typeof trackDeg === 'number') f.set('track', trackDeg);
@@ -375,6 +384,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         f.set('lat', lat);
         f.set('lon', lon);
         if (typeof alt === 'number') f.set('alt', alt);
+        if (typeof speedMs === 'number') f.set('speed', speedMs);
         if (typeof trackDeg === 'number') {
           f.set('track', trackDeg);
           f.setStyle(getPointStyle(theme, rot));
@@ -418,41 +428,10 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       v.animate({ center: fromLonLat([lon, lat]), zoom: z, duration: 400 });
     };
 
-    const fetchLatest = async () => {
+    const fetchTrackAndShowLagged = async () => {
       if (!callsign) return;
       try {
-        console.debug('[FlightMap] latest fetch', { callsign });
-        const resp = await fetch(`/api/flight?callsign=${encodeURIComponent(callsign)}`);
-        if (!resp.ok) {
-          console.debug('[FlightMap] latest not ok', resp.status);
-          return;
-        }
-        const data = await resp.json();
-        if (cancelled) return;
-        const firstState = (Array.isArray(data) ? data : [])[0];
-        const lat = firstState?.[6];
-        const lon = firstState?.[5];
-        const trackDeg = typeof firstState?.[10] === 'number' ? firstState[10] : undefined;
-        const alt = typeof firstState?.[13] === 'number' ? firstState[13] : (typeof firstState?.[7] === 'number' ? firstState[7] : undefined);
-        if (typeof trackDeg === 'number') {
-          lastTrackDegRef.current = trackDeg;
-        }
-        if (typeof lat === 'number' && typeof lon === 'number') {
-          ensureTrack(lon, lat);
-          ensurePoint(lon, lat, callsign, alt, trackDeg);
-          recenter(lon, lat);
-        } else {
-          console.debug('[FlightMap] latest: no coordinates');
-        }
-      } catch (e) {
-        console.debug('[FlightMap] latest error', e);
-      }
-    };
-
-    const fetchTrack = async () => {
-      if (!callsign) return;
-      try {
-        console.debug('[FlightMap] track fetch', { callsign });
+        console.debug('[FlightMap] track fetch (lagged 60s)', { callsign });
         const resp = await fetch(`/api/track?callsign=${encodeURIComponent(callsign)}`);
         if (!resp.ok) {
           console.debug('[FlightMap] track not ok', resp.status);
@@ -460,15 +439,26 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         }
         const data = await resp.json();
         if (cancelled) return;
-        const pts = Array.isArray(data?.points) ? data.points as Array<any> : [];
-        if (pts.length) {
-          const lonlats: [number, number][] = pts.map((p:any) => [p.lon, p.lat]);
-          setFullTrack(lonlats);
-          const last = pts[pts.length-1];
-          if (typeof last?.track === 'number') { lastTrackDegRef.current = last.track; }
-          ensurePoint(last.lon, last.lat, callsign, last.alt, last.track);
-          recenter(last.lon, last.lat);
+        const pts = Array.isArray(data?.points) ? (data.points as Array<any>) : [];
+        if (!pts.length) return;
+        const nowSec = Math.floor(Date.now() / 1000);
+        const cutoff = nowSec - VIS_LAG_SEC;
+        // Find last point with ts <= cutoff
+        let idx = -1;
+        for (let i = pts.length - 1; i >= 0; i--) {
+          if (typeof pts[i]?.ts === 'number' && pts[i].ts <= cutoff) { idx = i; break; }
         }
+        if (idx === -1) {
+          // no old-enough point yet; don't move marker
+          return;
+        }
+        // Update track line only up to visible point
+        const lonlats: [number, number][] = pts.slice(0, idx + 1).map((p: any) => [p.lon, p.lat]);
+        setFullTrack(lonlats);
+        const cur = pts[idx];
+        if (typeof cur?.track === 'number') { lastTrackDegRef.current = cur.track; }
+        ensurePoint(cur.lon, cur.lat, callsign, cur.alt, cur.track, typeof cur?.speed === 'number' ? cur.speed : undefined);
+        recenter(cur.lon, cur.lat);
       } catch (e) {
         console.debug('[FlightMap] track error', e);
       }
@@ -488,10 +478,9 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       return;
     }
 
-    // Fetch full historical track once, then poll for latest
-    fetchTrack();
-    fetchLatest();
-    timer = window.setInterval(() => fetchLatest(), 12000);
+    // Initial and periodic refresh (we always fetch full track but display with 60s lag)
+    fetchTrackAndShowLagged();
+    timer = window.setInterval(() => fetchTrackAndShowLagged(), 12000);
 
     return () => {
       cancelled = true;
@@ -552,6 +541,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
             feat.set('lon', p.lon);
             if (typeof p.alt === 'number') feat.set('alt', p.alt);
             if (typeof p.track === 'number') feat.set('track', p.track);
+            if (typeof p.speed === 'number') feat.set('speed', p.speed);
             source.addFeature(feat);
           }
         }

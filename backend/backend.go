@@ -317,6 +317,9 @@ func FlightHandler(w http.ResponseWriter, r *http.Request) {
 	row[4] = p.TS
 	row[5] = p.Lon
 	row[6] = p.Lat
+	if p.Speed != 0 {
+		row[9] = p.Speed // velocity in m/s per OpenSky schema
+	}
 	if p.Track != 0 {
 		row[10] = p.Track
 	}

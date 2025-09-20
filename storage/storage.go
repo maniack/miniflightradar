@@ -22,7 +22,8 @@ type Point struct {
 	Lat      float64 `json:"lat"`
 	Alt      float64 `json:"alt,omitempty"`
 	Track    float64 `json:"track,omitempty"`
-	TS       int64   `json:"ts"` // unix seconds
+	Speed    float64 `json:"speed,omitempty"` // velocity (m/s) from OpenSky, if available
+	TS       int64   `json:"ts"`              // unix seconds
 }
 
 type Store struct {
@@ -151,7 +152,11 @@ func (s *Store) UpsertStates(states [][]interface{}) error {
 			if v, ok := toFloat(st[10]); ok {
 				track = v
 			}
-			p := Point{Icao24: icao, Callsign: callsign, Lon: lon, Lat: lat, Alt: alt, Track: track, TS: ts}
+			var speed float64
+			if v, ok := toFloat(st[9]); ok {
+				speed = v // m/s per OpenSky
+			}
+			p := Point{Icao24: icao, Callsign: callsign, Lon: lon, Lat: lat, Alt: alt, Track: track, Speed: speed, TS: ts}
 			b, _ := json.Marshal(p)
 
 			keyPos := fmt.Sprintf("pos:%s:%010d", icao, ts)
