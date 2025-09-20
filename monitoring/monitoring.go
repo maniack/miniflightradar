@@ -1,3 +1,5 @@
+// Package monitoring provides Prometheus metrics, OpenTelemetry tracing,
+// and unified structured logging helpers for the application.
 package monitoring
 
 import (

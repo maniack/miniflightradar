@@ -132,3 +132,47 @@ docker run --rm -p 8080:8080 --name minifr mini-flightradar
 
 - Маркер отслеживаемого рейса заменён на значок самолёта; цвет и «ореол» подстраиваются под выбранную тему.
 - Если фильтр по позывному не задан, по умолчанию на карте показываются все доступные рейсы в текущем видимом участке (режим обзора).
+
+## Security and dependency hygiene
+
+- Frontend dependencies are pinned and patched using npm overrides to address known advisories in transitive packages (e.g., nth-check>=2.0.1, svgo>=2.8.0, postcss>=8.4.31).
+- Production builds use a clean, reproducible install via `npm ci` and the UI is embedded into the Go binary; Node tooling is not shipped to production.
+- Current audit status: no critical or high vulnerabilities in production dependencies. Two moderate advisories remain tied to `webpack-dev-server` via `react-scripts`; they apply only to the local development server and are not used in production builds. We track these upstream; eliminating them completely would require migrating off CRA.
+- Run an audit locally: `cd frontend && npm audit --omit=dev`.
+- If the lockfile ever drifts, refresh it with `npm install` (not `ci`) to re-resolve overrides, then re-run `npm ci` for reproducible installs.
+
+## License
+
+This project is licensed under the MIT License. See the LICENSE file for details.
+
+## Third‑party licenses and attributions
+
+The project uses the following third‑party software and data. Please review and comply with their licenses and terms when deploying this application:
+
+- OpenLayers (package `ol`) — BSD 2‑Clause license.
+  - Copyright © OpenLayers Contributors.
+  - https://openlayers.org/
+  - https://github.com/openlayers/openlayers/blob/main/LICENSE.md
+
+- Font Awesome Free (`@fortawesome/fontawesome-free`) — Code under MIT, icons under CC BY 4.0.
+  - https://github.com/FortAwesome/Font-Awesome/blob/6.x/LICENSE.txt
+
+- OpenStreetMap data and tiles — © OpenStreetMap contributors, ODbL 1.0 for data; tile usage subject to provider terms.
+  - https://www.openstreetmap.org/copyright
+  - Attribution is shown in the map UI as required.
+
+- CARTO Basemaps (Dark Matter OSM tiles) — usage subject to CARTO terms; attribution required (shown in UI).
+  - https://carto.com/basemaps/
+
+- Esri World Imagery and reference overlays — usage subject to Esri Terms of Use; attribution required (shown in UI).
+  - https://www.esri.com/en-us/legal/terms/full-master-agreement
+  - https://www.esri.com/en-us/legal/terms/data-attributions
+
+- OpenSky Network API — subject to OpenSky Network Terms of Use and API limitations.
+  - https://opensky-network.org/
+  - https://openskynetwork.github.io/opensky-api/
+  - We respect rate limits and include attribution in the UI.
+
+Notes:
+- This application fetches map tiles from external providers (OSM/CARTO/Esri). Ensure your deployment complies with their usage policies (e.g., fair use, API keys if required, proper attribution).
+- The backend may use your OpenSky credentials (OPENSKY_USER/OPENSKY_PASS) if provided, which may affect allowed request rates. Ensure your use complies with OpenSky’s ToS.

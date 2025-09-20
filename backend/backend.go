@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,7 +18,7 @@ import (
 	"github.com/maniack/miniflightradar/storage"
 )
 
-// FlightData структура OpenSky API response
+// FlightData is a minimal subset of the OpenSky /api/states/all response used by the ingestor.
 type FlightData struct {
 	States [][]interface{} `json:"states"`
 }
@@ -185,8 +186,8 @@ func parseRetryAfter(v string) time.Duration {
 	return 0
 }
 
-// FetchOpenSkyData выполняет запрос к OpenSky API /api/states/all
-// Если заданы переменные окружения OPENSKY_USER и OPENSKY_PASS, используется Basic Auth.
+// FetchOpenSkyData calls OpenSky /api/states/all and returns parsed states.
+// If environment variables OPENSKY_USER and OPENSKY_PASS are set, it uses Basic Auth.
 func FetchOpenSkyData() (*FlightData, error) {
 	url := "https://opensky-network.org/api/states/all"
 	client := buildHTTPClient(url)
@@ -332,7 +333,8 @@ func FlightHandler(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(filtered)
 }
 
-// FlightsInBBoxHandler returns current positions within bbox (minLon,minLat,maxLon,maxLat)
+// FlightsInBBoxHandler returns current positions within bbox (minLon,minLat,maxLon,maxLat).
+// It validates inputs to avoid pathological requests and responds with 400 on invalid parameters.
 func FlightsInBBoxHandler(w http.ResponseWriter, r *http.Request) {
 	bbox := r.URL.Query().Get("bbox")
 	parts := strings.Split(bbox, ",")
@@ -340,10 +342,38 @@ func FlightsInBBoxHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bbox is required as minLon,minLat,maxLon,maxLat", http.StatusBadRequest)
 		return
 	}
-	minLon, _ := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-	minLat, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-	maxLon, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-	maxLat, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+	parse := func(s string) (float64, bool) {
+		v, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+			return 0, false
+		}
+		return v, true
+	}
+	minLon, ok1 := parse(parts[0])
+	minLat, ok2 := parse(parts[1])
+	maxLon, ok3 := parse(parts[2])
+	maxLat, ok4 := parse(parts[3])
+	if !(ok1 && ok2 && ok3 && ok4) {
+		http.Error(w, "invalid bbox coordinates", http.StatusBadRequest)
+		return
+	}
+	// Clamp to valid ranges
+	if minLon < -180 {
+		minLon = -180
+	}
+	if maxLon > 180 {
+		maxLon = 180
+	}
+	if minLat < -90 {
+		minLat = -90
+	}
+	if maxLat > 90 {
+		maxLat = 90
+	}
+	if maxLon <= minLon || maxLat <= minLat {
+		http.Error(w, "invalid bbox order", http.StatusBadRequest)
+		return
+	}
 	pts, err := storage.Get().CurrentInBBox(minLon, minLat, maxLon, maxLat)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

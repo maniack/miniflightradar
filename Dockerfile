@@ -8,7 +8,7 @@ ENV REACT_APP_OTEL_EXPORTER_URL=${REACT_APP_OTEL_EXPORTER_URL}
 
 # Копируем package.json и package-lock.json
 COPY frontend/package*.json ./
-RUN npm install
+RUN npm ci
 
 # Копируем исходники и билдим
 COPY frontend/ ./

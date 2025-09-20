@@ -182,6 +182,14 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       return found;
     };
 
+    // Escape HTML to avoid XSS when rendering values coming from backend
+    const esc = (s: any) => String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+
     const showTooltip = (feat: Feature<Geometry> | null) => {
       const el = tooltipElRef.current;
       const ov = overlayRef.current;
@@ -206,7 +214,13 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       const alt = props.alt;
       const spd = props.speed; // m/s if present
       const knots = typeof spd === 'number' ? Math.round(spd * 1.94384449) : null;
-      el.innerHTML = `<div><strong>${cs || 'Unknown'}</strong><br/>lat: ${typeof lat==='number'?lat.toFixed(4):''}, lon: ${typeof lon==='number'?lon.toFixed(4):''}${typeof alt==='number'?`<br/>alt: ${Math.round(alt)} m`:''}${typeof knots==='number'?`<br/>spd: ${knots} kt`:''}</div>`;
+      // Only callsign is potentially untrusted string; numbers are formatted explicitly.
+      const csSafe = cs ? esc(cs) : 'Unknown';
+      const latStr = typeof lat === 'number' ? lat.toFixed(4) : '';
+      const lonStr = typeof lon === 'number' ? lon.toFixed(4) : '';
+      const altStr = typeof alt === 'number' ? `<br/>alt: ${Math.round(alt)} m` : '';
+      const spdStr = typeof knots === 'number' ? `<br/>spd: ${knots} kt` : '';
+      el.innerHTML = `<div><strong>${csSafe}</strong><br/>lat: ${latStr}, lon: ${lonStr}${altStr}${spdStr}</div>`;
       el.style.display = 'block';
       ov.setPosition([x, y]);
     };

@@ -6,7 +6,7 @@ build-backend:
 	go build -mod=vendor ./backend ./monitoring
 
 build-ui:
-	cd frontend && npm install && npm run build
+	cd frontend && npm ci && npm run build
 	rm -rf ui/build
 	cp -r frontend/build ui/
 

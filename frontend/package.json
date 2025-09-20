@@ -21,6 +21,11 @@
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22"
   },
+  "overrides": {
+    "nth-check": "^2.0.1",
+    "svgo": "^2.8.0",
+    "postcss": "^8.4.31"
+  },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",

@@ -17,6 +17,8 @@ import (
 )
 
 // Run is the main CLI action that starts the HTTP server.
+// It wires up monitoring, storage, background ingestion and HTTP routing.
+// Security hardening: the server enables timeouts and sets basic security headers.
 func Run(ctx context.Context, c *cli.Command) error {
 	listen := c.String("listen")
 	enableMetrics := c.Bool("metrics")
@@ -52,6 +54,17 @@ func Run(ctx context.Context, c *cli.Command) error {
 	r.Use(middleware.Recoverer)
 	// Request timeout
 	r.Use(middleware.Timeout(15 * time.Second))
+	// Basic security headers
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("Referrer-Policy", "no-referrer")
+			w.Header().Set("Permissions-Policy", "geolocation=(self)")
+			// Note: Content-Security-Policy can break map tiles if too strict; omitted intentionally.
+			next.ServeHTTP(w, r)
+		})
+	})
 	// Tracing before logging to ensure trace IDs are present
 	r.Use(monitoring.TracingMiddleware)
 	// Metrics and structured logging
@@ -68,5 +81,13 @@ func Run(ctx context.Context, c *cli.Command) error {
 	r.Handle("/*", ui.Handler())
 
 	log.Printf("Server listening on %s\n", listen)
-	return http.ListenAndServe(listen, r)
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           r,
+		ReadTimeout:       10 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+		WriteTimeout:      20 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
