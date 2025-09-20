@@ -44,11 +44,11 @@ const App: React.FC = () => {
   return (
     <div className="app">
       <div className="map-wrap">
-        {/* Top controls: search + layer switcher */}
+        {/* Top controls: search form only */}
         <div className="controls">
           <form onSubmit={onSubmit} style={{display:'flex',alignItems:'center',gap:8}}>
             <div className="field">
-              <span style={{color:'var(--muted)'}}>Callsign</span>
+              <span className="label">Callsign</span>
               <input
                 className="input"
                 type="text"
@@ -57,8 +57,15 @@ const App: React.FC = () => {
                 onChange={(e) => setCallsign(e.target.value.toUpperCase())}
               />
             </div>
-            <button className="button" type="submit" disabled={!canSearch}>Search</button>
+            <button className="button search-btn" type="submit" disabled={!canSearch} aria-label="Search">
+              <i className="fa-solid fa-magnifying-glass"></i>
+              <span className="btn-text">Search</span>
+            </button>
           </form>
+        </div>
+
+        {/* Bottom-left controls: layer switcher */}
+        <div className="bl-controls">
           <div className="layer-switch">
             <button
               className={`chip ${baseMode === 'osm' ? 'active' : ''}`}
@@ -80,7 +87,14 @@ const App: React.FC = () => {
         </div>
 
         {/* Map component */}
-        <FlightMap callsign={callsign} searchToken={searchToken} theme={theme} baseMode={baseMode} locateToken={locateToken} />
+        <FlightMap
+          callsign={callsign}
+          searchToken={searchToken}
+          theme={theme}
+          baseMode={baseMode}
+          locateToken={locateToken}
+          onSelectCallsign={(cs) => setCallsign(cs)}
+        />
 
         {/* Bottom-right controls: locate + theme toggle */}
         <div className="br-controls">
@@ -90,6 +104,14 @@ const App: React.FC = () => {
           <button className="fab-btn" onClick={toggleTheme} aria-label="Toggle theme" title="Toggle theme">
             {theme === 'light' ? <i className="fa-solid fa-moon"></i> : <i className="fa-solid fa-sun"></i>}
           </button>
+        </div>
+
+        {/* License / attribution */}
+        <div className="info-bar" aria-label="Attribution">
+          <small>
+            Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors ·
+            Flight data via <a href="https://opensky-network.org" target="_blank" rel="noreferrer">OpenSky Network</a>
+          </small>
         </div>
       </div>
     </div>

@@ -2,9 +2,19 @@ package backend
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/maniack/miniflightradar/monitoring"
+	"github.com/maniack/miniflightradar/storage"
 )
 
 // FlightData структура OpenSky API response
@@ -12,40 +22,356 @@ type FlightData struct {
 	States [][]interface{} `json:"states"`
 }
 
-// FetchOpenSkyData заглушка для запроса к OpenSky API
-func FetchOpenSkyData() (*FlightData, error) {
-	// TODO: Реальный запрос к OpenSky API
-	return &FlightData{
-		States: [][]interface{}{}, // Пример пустого ответа
-	}, nil
+var (
+	cacheMu   sync.Mutex
+	cacheData *FlightData
+	cacheAt   time.Time
+
+	pollInterval = 10 * time.Second
+
+	// HTTP client/proxy configuration
+	proxyOverride string
+	clientMu      sync.Mutex
+	httpClient    *http.Client
+)
+
+// SetPollInterval sets the polling interval for OpenSky ingestor (defaults to 10s).
+func SetPollInterval(d time.Duration) {
+	if d > 0 {
+		pollInterval = d
+	}
 }
 
+// GetPollInterval returns current polling interval.
+func GetPollInterval() time.Duration { return pollInterval }
+
+// SetProxy sets a CLI-provided proxy URL (overrides environment). Empty disables override.
+func SetProxy(p string) {
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	proxyOverride = strings.TrimSpace(p)
+	// reset client to rebuild with new proxy settings on next use
+	httpClient = nil
+}
+
+// noProxyMatch reports whether host should bypass proxy according to NO_PROXY/no_proxy env.
+func noProxyMatch(host string) bool {
+	if host == "" {
+		return false
+	}
+	noProxy := os.Getenv("NO_PROXY")
+	if noProxy == "" {
+		noProxy = os.Getenv("no_proxy")
+	}
+	if noProxy == "" {
+		return false
+	}
+	host = strings.ToLower(host)
+	for _, token := range strings.Split(noProxy, ",") {
+		t := strings.ToLower(strings.TrimSpace(token))
+		if t == "" {
+			continue
+		}
+		if t == "*" {
+			return true
+		}
+		// strip port in token if any
+		if h, _, err := net.SplitHostPort(t); err == nil {
+			t = h
+		}
+		// strip port from host too
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		// leading dot means suffix match
+		if strings.HasPrefix(t, ".") {
+			if strings.HasSuffix(host, t) || host == strings.TrimPrefix(t, ".") {
+				return true
+			}
+			continue
+		}
+		// exact or subdomain match
+		if host == t || strings.HasSuffix(host, "."+t) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildHTTPClient builds (once) an HTTP client honoring CLI proxy override and environment proxies.
+func buildHTTPClient(target string) *http.Client {
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	if httpClient != nil {
+		return httpClient
+	}
+
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	tr := &http.Transport{
+		Proxy:               nil,
+		DialContext:         dialer.DialContext,
+		ForceAttemptHTTP2:   true,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+
+	source := "none"
+	mode := "direct"
+	bypass := false
+
+	// Determine target host
+	thost := ""
+	if u, err := url.Parse(target); err == nil {
+		thost = u.Hostname()
+	}
+
+	if proxyOverride != "" {
+		source = "cli"
+		purl, err := url.Parse(proxyOverride)
+		if err == nil && purl.Host != "" {
+			bypass = noProxyMatch(thost)
+			if !bypass {
+				mode = strings.ToLower(purl.Scheme)
+				fixed := purl
+				tr.Proxy = func(req *http.Request) (*url.URL, error) {
+					if noProxyMatch(req.URL.Hostname()) {
+						return nil, nil
+					}
+					return fixed, nil
+				}
+			}
+		}
+	} else {
+		// Environment (honors http_proxy/https_proxy/all_proxy/no_proxy)
+		source = "env"
+		tr.Proxy = http.ProxyFromEnvironment
+		if req, _ := http.NewRequest("GET", target, nil); req != nil {
+			if purl, _ := http.ProxyFromEnvironment(req); purl != nil {
+				mode = strings.ToLower(purl.Scheme)
+			}
+		}
+	}
+
+	httpClient = &http.Client{Transport: tr, Timeout: 15 * time.Second}
+	monitoring.Debugf("http_client configured source=%s mode=%s bypass=%t", source, mode, bypass)
+	return httpClient
+}
+
+// RateLimitError indicates API rate limiting with suggested retry delay.
+type RateLimitError struct {
+	Status     int
+	RetryAfter time.Duration
+}
+
+func (e *RateLimitError) Error() string {
+	return fmt.Sprintf("rate limited: status=%d retry_after=%s", e.Status, e.RetryAfter)
+}
+
+func parseRetryAfter(v string) time.Duration {
+	if v == "" {
+		return 0
+	}
+	// seconds
+	if secs, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+		return time.Duration(secs) * time.Second
+	}
+	// HTTP-date
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+// FetchOpenSkyData выполняет запрос к OpenSky API /api/states/all
+// Если заданы переменные окружения OPENSKY_USER и OPENSKY_PASS, используется Basic Auth.
+func FetchOpenSkyData() (*FlightData, error) {
+	url := "https://opensky-network.org/api/states/all"
+	client := buildHTTPClient(url)
+
+	// Auth for faster quota if available; TTL driven by configured poll interval
+	u, p := os.Getenv("OPENSKY_USER"), os.Getenv("OPENSKY_PASS")
+	auth := u != "" && p != ""
+	ttl := GetPollInterval()
+	if ttl <= 0 {
+		ttl = 10 * time.Second
+	}
+
+	// Serve from cache if fresh
+	cacheMu.Lock()
+	if cacheData != nil && time.Since(cacheAt) < ttl {
+		age := time.Since(cacheAt)
+		cacheMu.Unlock()
+		monitoring.Debugf("opensky cache hit age=%s ttl=%s states=%d", age, ttl, len(cacheData.States))
+		return cacheData, nil
+	}
+	cacheMu.Unlock()
+
+	start := time.Now()
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if auth {
+		req.SetBasicAuth(u, p)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 5<<20)) // limit 5MB
+	dur := time.Since(start)
+	monitoring.Debugf("opensky request url=%s status=%d duration=%s body_len=%d", url, resp.StatusCode, dur, len(body))
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		ra := parseRetryAfter(resp.Header.Get("Retry-After"))
+		if ra <= 0 {
+			ra = 30 * time.Second
+		}
+		return nil, &RateLimitError{Status: resp.StatusCode, RetryAfter: ra}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("opensky status %d", resp.StatusCode)
+	}
+	var data FlightData
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, err
+	}
+	monitoring.Debugf("opensky states count=%d", len(data.States))
+	// Update cache
+	cacheMu.Lock()
+	cacheData = &data
+	cacheAt = time.Now()
+	cacheMu.Unlock()
+	return &data, nil
+}
+
+// IngestLoop periodically fetches from OpenSky and stores into BuntDB.
+func IngestLoop(stop <-chan struct{}) {
+	sleep := GetPollInterval()
+	if sleep <= 0 {
+		sleep = 10 * time.Second
+	}
+	for {
+		select {
+		case <-stop:
+			return
+		case <-time.After(sleep):
+			data, err := FetchOpenSkyData()
+			if err != nil {
+				if rl, ok := err.(*RateLimitError); ok {
+					monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s", rl.Status, rl.RetryAfter)
+					sleep = rl.RetryAfter
+					continue
+				}
+				monitoring.Debugf("ingestor fetch error: %v", err)
+				// On error, try again after normal interval
+				sleep = GetPollInterval()
+				if sleep <= 0 {
+					sleep = 10 * time.Second
+				}
+				continue
+			}
+			if data != nil {
+				_ = storage.Get().UpsertStates(data.States)
+				monitoring.Debugf("ingestor upserted states=%d", len(data.States))
+			}
+			// normal sleep
+			sleep = GetPollInterval()
+			if sleep <= 0 {
+				sleep = 10 * time.Second
+			}
+		}
+	}
+}
+
+func normalizeCallsign(s string) string {
+	return strings.ToUpper(strings.TrimSpace(s))
+}
+
+// FlightHandler returns latest sample for callsign from storage (OpenSky-compatible shape)
 func FlightHandler(w http.ResponseWriter, r *http.Request) {
-	callsign := r.URL.Query().Get("callsign")
-	if callsign == "" {
+	callsignRaw := r.URL.Query().Get("callsign")
+	if strings.TrimSpace(callsignRaw) == "" {
 		http.Error(w, "callsign is required", http.StatusBadRequest)
 		monitoring.FlightErrors.WithLabelValues("unknown").Inc()
 		monitoring.LastStatus.WithLabelValues("unknown").Set(400.0)
 		return
 	}
+	callsign := normalizeCallsign(callsignRaw)
 
-	data, err := FetchOpenSkyData()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		monitoring.FlightErrors.WithLabelValues(callsign).Inc()
-		monitoring.LastStatus.WithLabelValues(callsign).Set(500.0)
+	p, err := storage.Get().LatestByCallsign(callsign)
+	if err != nil || p == nil {
+		monitoring.Debugf("flight latest not found callsign=%s err=%v", callsign, err)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([][]interface{}{})
 		return
 	}
 
-	filtered := make([][]interface{}, 0)
-	for _, s := range data.States {
-		if cs, ok := s[1].(string); ok && cs == callsign {
-			filtered = append(filtered, s)
-		}
+	// Return OpenSky-compatible "states" array with just one entry
+	row := make([]interface{}, 17)
+	row[0] = p.Icao24
+	row[1] = p.Callsign
+	row[4] = p.TS
+	row[5] = p.Lon
+	row[6] = p.Lat
+	if p.Track != 0 {
+		row[10] = p.Track
 	}
-
+	if p.Alt != 0 {
+		row[13] = p.Alt
+	}
+	filtered := [][]interface{}{row}
 	monitoring.UpdateAircraftCount(callsign, len(filtered))
-
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(filtered)
+	_ = json.NewEncoder(w).Encode(filtered)
+}
+
+// FlightsInBBoxHandler returns current positions within bbox (minLon,minLat,maxLon,maxLat)
+func FlightsInBBoxHandler(w http.ResponseWriter, r *http.Request) {
+	bbox := r.URL.Query().Get("bbox")
+	parts := strings.Split(bbox, ",")
+	if len(parts) != 4 {
+		http.Error(w, "bbox is required as minLon,minLat,maxLon,maxLat", http.StatusBadRequest)
+		return
+	}
+	minLon, _ := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	minLat, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	maxLon, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	maxLat, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+	pts, err := storage.Get().CurrentInBBox(minLon, minLat, maxLon, maxLat)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(pts)
+}
+
+// TrackHandler returns historical track for callsign from storage
+func TrackHandler(w http.ResponseWriter, r *http.Request) {
+	callsignRaw := r.URL.Query().Get("callsign")
+	if strings.TrimSpace(callsignRaw) == "" {
+		http.Error(w, "callsign is required", http.StatusBadRequest)
+		return
+	}
+	callsign := normalizeCallsign(callsignRaw)
+	pts, icao, err := storage.Get().TrackByCallsign(callsign, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	resp := struct {
+		Callsign string          `json:"callsign"`
+		Icao24   string          `json:"icao24"`
+		Points   []storage.Point `json:"points"`
+	}{
+		Callsign: callsign,
+		Icao24:   icao,
+		Points:   pts,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
 }

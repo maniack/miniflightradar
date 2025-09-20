@@ -3,6 +3,11 @@
   --control-gap: 8px;
   --fab-size: 48px;
   --control-margin: 16px;
+  --safe-bottom: 28px; /* extra space to avoid covering OSM attribution */
+  /* Semi-transparent glass variables */
+  --glass-bg: color-mix(in srgb, var(--bg), transparent 20%);
+  --glass-elev: color-mix(in srgb, var(--bg-elev), transparent 30%);
+  --glass-border: color-mix(in srgb, var(--border), transparent 40%);
 }
 :root[data-theme='light'] {
   --bg: #ffffff;
@@ -38,6 +43,7 @@ body {
 
 .app {
   height: 100vh;
+  height: 100dvh; /* better on mobile Safari */
   display: flex;
   flex-direction: column;
 }
@@ -63,20 +69,36 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: color-mix(in srgb, var(--bg), transparent 10%);
+  background: var(--glass-bg);
   backdrop-filter: saturate(160%) blur(8px);
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 8px;
   box-shadow: var(--shadow);
+}
+
+/* Top-right overlay container for layer switcher (unused now) */
+.tr-controls {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 1050;
+}
+
+/* Bottom-left overlay container for layer switcher */
+.bl-controls {
+  position: absolute;
+  left: var(--control-margin);
+  bottom: calc(var(--control-margin) + var(--safe-bottom));
+  z-index: 1050;
 }
 
 .controls .field {
   display: flex;
   align-items: center;
   gap: 6px;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
+  background: var(--glass-elev);
+  border: 1px solid var(--glass-border);
   border-radius: 8px;
   padding: 6px 8px;
 }
@@ -91,17 +113,22 @@ body {
 
 .button {
   appearance: none;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--primary), transparent 20%);
   border-radius: 8px;
   padding: 8px 12px;
-  background: var(--primary);
+  background: color-mix(in srgb, var(--primary), transparent 20%);
   color: var(--primary-contrast);
   font-weight: 600;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   transition: background-color .2s ease, color .2s ease, filter .15s ease, transform .06s ease, box-shadow .2s ease, border-color .2s ease;
 }
+.button.search-btn i { font-size: 16px; }
 .button.secondary {
-  background: var(--bg-elev);
+  background: var(--glass-elev);
+  border-color: var(--glass-border);
   color: var(--text);
 }
 .button:disabled {
@@ -116,19 +143,33 @@ body {
   left: 50%;
   transform: translateX(-50%);
   z-index: 1000;
-  background: color-mix(in srgb, var(--bg), transparent 10%);
-  border: 1px solid var(--border);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
-  padding: 8px 12px;
+  padding: 6px 10px;
   box-shadow: var(--shadow);
   color: var(--muted);
+  font-size: 12px;
+}
+.info-bar a { color: inherit; text-decoration: underline; }
+
+/* Tooltip shown over features */
+.map-tooltip {
+  pointer-events: none;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 12px;
 }
 
 /* Bottom-right vertical stack for controls */
 .br-controls {
   position: absolute;
   right: 16px;
-  bottom: 16px;
+  bottom: calc(16px + var(--safe-bottom));
   z-index: 1100;
   display: flex;
   flex-direction: column;
@@ -138,8 +179,8 @@ body {
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-elev);
   color: var(--text);
   display: grid;
   place-items: center;
@@ -152,7 +193,7 @@ body {
 /* Reposition and restyle OpenLayers zoom control to match FAB buttons */
 .ol-zoom {
   right: 16px !important;
-  bottom: calc(var(--control-margin) + (2 * var(--fab-size) + var(--control-gap)) + var(--control-gap)) !important; /* equal gap to br-controls */
+  bottom: calc(var(--control-margin) + var(--safe-bottom) + (2 * var(--fab-size) + var(--control-gap)) + 12px) !important; /* keep above BR controls and OSM attribution */
   left: auto !important;
   top: auto !important;
   display: flex !important;
@@ -167,8 +208,8 @@ body {
   width: 48px !important;
   height: 48px !important;
   border-radius: 50% !important;
-  border: 1px solid var(--border) !important;
-  background: var(--bg-elev) !important;
+  border: 1px solid var(--glass-border) !important;
+  background: var(--glass-elev) !important;
   color: var(--text) !important;
   display: grid !important;
   place-items: center !important;
@@ -193,10 +234,11 @@ body {
   display: flex;
   gap: 6px;
   align-items: center;
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
+  background: var(--glass-elev);
+  border: 1px solid var(--glass-border);
   padding: 4px;
   border-radius: 10px;
+  backdrop-filter: saturate(160%) blur(8px);
 }
 .layer-switch .chip {
   appearance: none;
@@ -213,9 +255,9 @@ body {
 }
 .layer-switch .chip i { font-size: 14px; }
 .layer-switch .chip.active {
-  background: var(--primary);
+  background: color-mix(in srgb, var(--primary), transparent 20%);
   color: var(--primary-contrast);
-  border-color: var(--primary);
+  border-color: color-mix(in srgb, var(--primary), transparent 20%);
 }
 
 /* Responsive tweaks */
@@ -224,11 +266,41 @@ body {
     left: 8px;
     right: 8px;
     transform: none;
+    top: 12px; /* compact top margin on mobile */
   }
+  /* Keep search on one line on mobile */
+  .controls form { flex-wrap: nowrap; width: 100%; }
+  .controls .field { flex: 1 1 auto; }
+  .controls .button.search-btn { width: auto; padding: 8px 10px; }
+  .controls .button.search-btn .btn-text { display: none; }
   .input {
     min-width: 0;
-    width: 40vw;
+    width: 100%;
   }
+  /* Move layer switcher under the search form and make it icon-only */
+  .bl-controls { left: 8px; bottom: auto; top: 84px; }
+  .layer-switch { padding: 4px; gap: 4px; }
+  .layer-switch .chip { padding: 8px; width: 40px; height: 40px; justify-content: center; }
+  .layer-switch .chip span { display: none; }
+}
+
+/* Ensure extra separation between zoom and bottom-right controls on very compact screens */
+@media (max-width: 420px) {
+  .ol-zoom {
+    bottom: calc(var(--control-margin) + var(--safe-bottom) + (2 * var(--fab-size) + var(--control-gap)) + 16px) !important;
+  }
+}
+
+/* iPhone SE/compact width optimizations */
+@media (max-width: 375px) {
+  :root {
+    --fab-size: 44px;
+    --control-gap: 6px;
+    --control-margin: 12px;
+  }
+  .controls form { flex-wrap: wrap; }
+  .controls .field .label { display: none; }
+  .button { padding: 8px 10px; }
 }
 
 
@@ -259,4 +331,17 @@ body {
 /* Make zoom buttons active state consistent */
 .ol-zoom button:active {
   transform: translateY(1px) !important;
+}
+
+
+/* Mobile landscape: move layer switcher to top-left and use icon-only chips */
+@media (orientation: landscape) and (max-height: 480px) {
+  .bl-controls {
+    left: 8px;
+    bottom: auto;
+    top: 12px;
+  }
+  .layer-switch { padding: 4px; gap: 4px; }
+  .layer-switch .chip { padding: 8px; width: 40px; height: 40px; justify-content: center; }
+  .layer-switch .chip span { display: none; }
 }

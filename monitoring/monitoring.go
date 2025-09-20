@@ -5,7 +5,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +24,9 @@ import (
 var (
 	// Common namespace for all metrics in the app
 	namespace = "miniflightradar"
+
+	// logging level: 0=info, 1=debug
+	logLevel int32
 
 	// Flight API metrics
 	FlightRequests = prometheus.NewCounterVec(
@@ -108,6 +113,45 @@ func init() {
 		HTTPRequests,
 		HTTPDuration,
 	)
+
+	// default from env
+	ConfigureLogLevelFromEnv()
+}
+
+// Logging level helpers
+func SetLogLevel(level string) {
+	switch strings.ToLower(level) {
+	case "debug":
+		atomic.StoreInt32(&logLevel, 1)
+		log.Printf("log_level=debug")
+	case "info", "":
+		atomic.StoreInt32(&logLevel, 0)
+		log.Printf("log_level=info")
+	default:
+		// unknown -> info
+		atomic.StoreInt32(&logLevel, 0)
+		log.Printf("log_level=info (unknown level %q)", level)
+	}
+}
+
+func ConfigureLogLevelFromEnv() {
+	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
+		SetLogLevel(lvl)
+		return
+	}
+	if d := strings.ToLower(os.Getenv("DEBUG")); d == "1" || d == "true" || d == "yes" {
+		SetLogLevel("debug")
+		return
+	}
+	SetLogLevel("info")
+}
+
+func IsDebug() bool { return atomic.LoadInt32(&logLevel) == 1 }
+
+func Debugf(format string, args ...interface{}) {
+	if IsDebug() {
+		log.Printf("DEBUG "+format, args...)
+	}
 }
 
 // ============ Helpers and middlewares for metrics ============

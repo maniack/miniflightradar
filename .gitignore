@@ -3,3 +3,4 @@ vendor/
 bin/
 ui/build/
 frontend/build/
+data/**

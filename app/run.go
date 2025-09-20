@@ -12,18 +12,40 @@ import (
 
 	"github.com/maniack/miniflightradar/backend"
 	"github.com/maniack/miniflightradar/monitoring"
+	"github.com/maniack/miniflightradar/storage"
 	"github.com/maniack/miniflightradar/ui"
 )
 
 // Run is the main CLI action that starts the HTTP server.
 func Run(ctx context.Context, c *cli.Command) error {
 	listen := c.String("listen")
-	enableMetrics := c.Bool("enable-metrics")
-	tracingEndpoint := c.String("tracing-endpoint")
+	enableMetrics := c.Bool("metrics")
+	tracingEndpoint := c.String("tracing")
+	retention := c.Duration("retention")
+	poll := c.Duration("interval")
+	proxy := c.String("proxy")
+
+	// Logging level (override env if flag provided)
+	if c.Bool("debug") {
+		monitoring.SetLogLevel("debug")
+	}
 
 	// Tracing
 	shutdownTracer := monitoring.InitTracer(tracingEndpoint, "mini-flightradar")
 	defer shutdownTracer()
+
+	// Open storage and start ingestor
+	if _, err := storage.Open(retention); err != nil {
+		log.Printf("failed to open storage: %v", err)
+	}
+	// Configure poll interval
+	backend.SetPollInterval(poll)
+	// Configure proxy for backend HTTP client
+	backend.SetProxy(proxy)
+
+	stop := make(chan struct{})
+	go backend.IngestLoop(stop)
+	defer close(stop)
 
 	r := chi.NewRouter()
 	// Use Recoverer early to ensure panics are caught
@@ -41,6 +63,8 @@ func Run(ctx context.Context, c *cli.Command) error {
 	}
 
 	r.Get("/api/flight", monitoring.InstrumentedFlightHandler(backend.FlightHandler))
+	r.Get("/api/flights", backend.FlightsInBBoxHandler)
+	r.Get("/api/track", backend.TrackHandler)
 	r.Handle("/*", ui.Handler())
 
 	log.Printf("Server listening on %s\n", listen)
