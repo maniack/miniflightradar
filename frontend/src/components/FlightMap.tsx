@@ -12,9 +12,10 @@ import { fromLonLat } from "ol/proj";
 
 interface FlightMapProps {
   callsign: string;
+  searchToken: number;
 }
 
-const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
+const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken }) => {
   const mapRef = useRef<Map | null>(null);
   const vectorSourceRef = useRef<VectorSource>(new VectorSource());
 
@@ -29,8 +30,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
         new VectorLayer({ source: vectorSourceRef.current }),
       ],
       view: new View({
-        center: fromLonLat([-0.09, 51.505]),
-        zoom: 3,
+        center: fromLonLat([0, 20]),
+        zoom: 2,
       }),
     });
 
@@ -41,7 +42,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
     };
   }, []);
 
-  // Poll backend and update markers
+  // Fetch once when user clicks Search
   useEffect(() => {
     const source = vectorSourceRef.current;
     if (!callsign) {
@@ -50,7 +51,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
     }
 
     let cancelled = false;
-    const interval = setInterval(async () => {
+    (async () => {
       try {
         const resp = await fetch(`/api/flight?callsign=${encodeURIComponent(callsign)}`);
         if (!resp.ok) return;
@@ -60,6 +61,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
         // Clear existing points
         source.clear();
 
+        let firstCoord: [number, number] | null = null;
         // Add new points
         (data || []).forEach((state: any) => {
           const lat = state?.[6];
@@ -68,21 +70,25 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign }) => {
             const feature = new Feature({
               geometry: new Point(fromLonLat([lon, lat])),
             });
+            if (!firstCoord) firstCoord = [lon, lat];
             source.addFeature(feature);
           }
         });
+
+        // Recenter map on the first point
+        if (firstCoord && mapRef.current) {
+          const v = mapRef.current.getView();
+          v.animate({ center: fromLonLat(firstCoord), zoom: 6, duration: 400 });
+        }
       } catch (e) {
         // ignore fetch errors for demo
       }
-    }, 5000);
+    })();
 
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [callsign]);
+    return () => { cancelled = true; };
+  }, [callsign, searchToken]);
 
-  return <div id="map" style={{ height: "600px", width: "100%" }}></div>;
+  return <div id="map" style={{ position: 'absolute', inset: 0 }}></div>;
 };
 
 export default FlightMap;

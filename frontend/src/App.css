@@ -1,0 +1,132 @@
+/* Global resets and CSS variables for theming */
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --bg-elev: #f5f7fb;
+  --text: #0f172a;
+  --muted: #6b7280;
+  --primary: #2563eb;
+  --primary-contrast: #ffffff;
+  --border: #e5e7eb;
+  --shadow: 0 10px 25px rgba(2, 6, 23, 0.08);
+}
+:root[data-theme='dark'] {
+  --bg: #0b1220;
+  --bg-elev: #111827;
+  --text: #e5e7eb;
+  --muted: #9ca3af;
+  --primary: #60a5fa;
+  --primary-contrast: #111827;
+  --border: #1f2937;
+  --shadow: 0 10px 25px rgba(0, 0, 0, 0.6);
+}
+
+html, body, #root {
+  height: 100%;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+    Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', Arial, sans-serif;
+}
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.map-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0; /* for flexbox + children */
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+/* Controls overlay like Google Maps */
+.controls {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in srgb, var(--bg), transparent 10%);
+  backdrop-filter: saturate(160%) blur(8px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: var(--shadow);
+}
+
+.controls .field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.input {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  min-width: 160px;
+}
+
+.button {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--primary);
+  color: var(--primary-contrast);
+  font-weight: 600;
+  cursor: pointer;
+}
+.button.secondary {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Bottom info bar (optional use) */
+.info-bar {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1000;
+  background: color-mix(in srgb, var(--bg), transparent 10%);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 12px;
+  box-shadow: var(--shadow);
+  color: var(--muted);
+}
+
+/* Responsive tweaks */
+@media (max-width: 640px) {
+  .controls {
+    left: 8px;
+    right: 8px;
+    transform: none;
+  }
+  .input {
+    min-width: 0;
+    width: 40vw;
+  }
+}
