@@ -98,6 +98,7 @@ body {
   color: var(--primary-contrast);
   font-weight: 600;
   cursor: pointer;
+  transition: background-color .2s ease, color .2s ease, filter .15s ease, transform .06s ease, box-shadow .2s ease, border-color .2s ease;
 }
 .button.secondary {
   background: var(--bg-elev);
@@ -144,6 +145,7 @@ body {
   place-items: center;
   box-shadow: var(--shadow);
   cursor: pointer;
+  transition: background-color .2s ease, color .2s ease, filter .15s ease, transform .06s ease, box-shadow .2s ease, border-color .2s ease;
 }
 .fab-btn i { font-size: 18px; }
 
@@ -174,12 +176,16 @@ body {
   padding: 0 !important;
   line-height: 1 !important;
   font-size: 22px !important;
+  transition: background-color .2s ease, color .2s ease, filter .15s ease, transform .06s ease, box-shadow .2s ease, border-color .2s ease !important;
 }
 .ol-zoom button:hover {
-  filter: brightness(0.98);
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%) !important;
+  outline-offset: 2px !important;
 }
-.ol-zoom button:focus {
-  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%);
+.ol-zoom button:focus { outline: none !important; }
+.ol-zoom button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%) !important;
+  outline-offset: 2px !important;
 }
 
 /* Layer switcher control */
@@ -203,6 +209,7 @@ body {
   padding: 6px 8px;
   border-radius: 8px;
   cursor: pointer;
+  transition: background-color .2s ease, color .2s ease, filter .15s ease, transform .06s ease, border-color .2s ease, box-shadow .2s ease;
 }
 .layer-switch .chip i { font-size: 14px; }
 .layer-switch .chip.active {
@@ -222,4 +229,34 @@ body {
     min-width: 0;
     width: 40vw;
   }
+}
+
+
+/* Unified hover/active/focus styles across controls */
+/* Add outline on hover to all buttons; no color/brightness change on hover */
+.button:hover:not(:disabled),
+.fab-btn:hover,
+.layer-switch .chip:hover {
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%);
+  outline-offset: 2px;
+}
+.button:active:not(:disabled),
+.fab-btn:active,
+.layer-switch .chip:active {
+  transform: translateY(1px);
+}
+.button:focus-visible,
+.fab-btn:focus-visible,
+.layer-switch .chip:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%);
+  outline-offset: 2px;
+}
+/* Ensure active chips don't change on hover */
+.layer-switch .chip.active:hover {
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%);
+  outline-offset: 2px;
+}
+/* Make zoom buttons active state consistent */
+.ol-zoom button:active {
+  transform: translateY(1px) !important;
 }
