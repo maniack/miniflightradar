@@ -21,6 +21,26 @@ const App: React.FC = () => {
     return 'osm';
   });
 
+  // Helper to sync callsign with URL query param
+  const setURLCallsign = (cs: string | null, replace = false) => {
+    try {
+      const url = new URL(window.location.href);
+      if (cs && cs.trim()) {
+        url.searchParams.set('callsign', cs.trim().toUpperCase());
+      } else {
+        url.searchParams.delete('callsign');
+      }
+      const href = url.toString();
+      if (replace) {
+        window.history.replaceState({}, '', href);
+      } else {
+        window.history.pushState({}, '', href);
+      }
+    } catch (_) {
+      // ignore URL errors
+    }
+  };
+
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
@@ -30,12 +50,47 @@ const App: React.FC = () => {
     localStorage.setItem('baseMode', baseMode);
   }, [baseMode]);
 
+  // On initial load, read callsign from URL and auto-trigger search
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const cs = url.searchParams.get('callsign');
+      if (cs && cs.trim()) {
+        const up = cs.trim().toUpperCase();
+        setCallsign(up);
+        setSearchToken((x) => x + 1);
+      }
+    } catch (_) {
+      // noop
+    }
+  }, []);
+
+  // React to browser back/forward navigation
+  useEffect(() => {
+    const handler = () => {
+      try {
+        const url = new URL(window.location.href);
+        const cs = url.searchParams.get('callsign');
+        const up = cs ? cs.trim().toUpperCase() : '';
+        setCallsign(up);
+        setSearchToken((x) => x + 1);
+      } catch (_) {
+        // noop
+      }
+    };
+    window.addEventListener('popstate', handler);
+    return () => window.removeEventListener('popstate', handler);
+  }, []);
+
   const canSearch = useMemo(() => callsign.trim().length > 0, [callsign]);
 
   const onSubmit = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!canSearch) return;
+    const up = callsign.trim().toUpperCase();
+    setCallsign(up);
     setSearchToken((x) => x + 1);
+    setURLCallsign(up, false);
   };
 
   const toggleTheme = () => setTheme((t) => (t === 'light' ? 'dark' : 'light'));
@@ -93,7 +148,12 @@ const App: React.FC = () => {
           theme={theme}
           baseMode={baseMode}
           locateToken={locateToken}
-          onSelectCallsign={(cs) => setCallsign(cs)}
+          onSelectCallsign={(cs) => {
+            const up = (cs || '').toString().toUpperCase();
+            setCallsign(up);
+            setSearchToken((x) => x + 1);
+            setURLCallsign(up, false);
+          }}
         />
 
         {/* Bottom-right controls: locate + theme toggle */}

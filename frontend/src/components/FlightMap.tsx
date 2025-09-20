@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import "ol/ol.css";
-import Map from "ol/Map";
+import OlMap from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
 import VectorLayer from "ol/layer/Vector";
@@ -30,7 +30,7 @@ interface FlightMapProps {
 }
 
 const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign }) => {
-  const mapRef = useRef<Map | null>(null);
+  const mapRef = useRef<OlMap | null>(null);
   const vectorSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   // Source/layer for tracked flight + its track (on top)
   const flightFeatureRef = useRef<Feature<Point> | null>(null);
@@ -38,6 +38,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   // Source/layer for all flights in viewport (underneath)
   const allSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   const allLayerRef = useRef<VectorLayer<Feature<Geometry>> | null>(null);
+  // Index of all-flights features keyed by id (icao24 or callsign)
+  const allIndexRef = useRef<Map<string, Feature<Point>>>(new Map());
   const baseOSMLightRef = useRef<TileLayer<any> | null>(null);
   const baseOSMDarkRef = useRef<TileLayer<any> | null>(null);
   const baseHybImageryRef = useRef<TileLayer<any> | null>(null);
@@ -134,7 +136,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     const vectorLayer = new VectorLayer({ source: vectorSourceRef.current });
     vectorLayerRef.current = vectorLayer;
 
-    const map = new Map({
+    const map = new OlMap({
       target: "map",
       layers: [osmLight, osmDark, hybImagery, hybLabelsPlaces, hybLabelsTransport, allLayer, vectorLayer],
       view: new View({
@@ -399,10 +401,21 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         animFromRef.current = from as [number, number];
         animToRef.current = to as [number, number];
         animStartRef.current = performance.now();
-        const DURATION = 800; // ms
+        // Duration based on distance and speed to keep motion physically plausible
+        let durationMs = 800;
+        const fromXY = animFromRef.current!;
+        const toXY = animToRef.current!;
+        const ddx = toXY[0] - fromXY[0];
+        const ddy = toXY[1] - fromXY[1];
+        const distMeters = Math.sqrt(ddx * ddx + ddy * ddy);
+        const spd = (typeof speedMs === 'number' && speedMs > 0) ? speedMs : (Number(f.get('speed')) || 0);
+        if (spd > 0) {
+          // Clamp to sane range so UI stays responsive
+          durationMs = Math.max(300, Math.min(12000, (distMeters / spd) * 1000));
+        }
         const step = (now: number) => {
           const start = animStartRef.current;
-          const t = Math.min(1, (now - start) / DURATION);
+          const t = Math.min(1, (now - start) / durationMs);
           const e = easeInOut(t);
           const fxy = animFromRef.current!;
           const txy = animToRef.current!;
@@ -519,6 +532,47 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     };
     layer.setStyle(styleFn as any);
 
+    const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
+
+    const animateMove = (feat: Feature<Point>, to: [number, number]) => {
+      const anyFeat = feat as any;
+      if (anyFeat.__animHandle) {
+        cancelAnimationFrame(anyFeat.__animHandle);
+        anyFeat.__animHandle = null;
+      }
+      const geom = feat.getGeometry() as Point;
+      const from = geom.getCoordinates() as [number, number];
+      const dx = to[0] - from[0];
+      const dy = to[1] - from[1];
+      const dist2 = dx * dx + dy * dy;
+      if (dist2 < 1) { // ~ <1m, snap
+        geom.setCoordinates(to);
+        return;
+      }
+      // Duration based on distance and reported speed (m/s)
+      let durationMs = 800;
+      const distMeters = Math.sqrt(dist2);
+      const spd = Number(feat.get('speed'));
+      if (!isNaN(spd) && spd > 0) {
+        durationMs = Math.max(300, Math.min(10000, (distMeters / spd) * 1000));
+      }
+      const start = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - start) / durationMs);
+        const e = easeInOut(t);
+        const x = from[0] + dx * e;
+        const y = from[1] + dy * e;
+        geom.setCoordinates([x, y]);
+        if (t < 1 && !cancelled) {
+          anyFeat.__animHandle = requestAnimationFrame(step);
+        } else {
+          anyFeat.__animHandle = null;
+          geom.setCoordinates(to);
+        }
+      };
+      anyFeat.__animHandle = requestAnimationFrame(step);
+    };
+
     const fetchAll = async () => {
       if (callsign) return; // only in browse mode
       if (!map.getSize()) return;
@@ -530,19 +584,43 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         console.debug('[FlightMap] bbox fetch', bbox);
         const resp = await fetch(`/api/flights?bbox=${bbox}`);
         if (!resp.ok) return;
-        const pts = await resp.json(); // array of {icao24,callsign,lon,lat,alt?,track?,ts}
+        const pts = await resp.json(); // array of {icao24,callsign,lon,lat,alt?,track?,speed?,ts}
         if (cancelled) return;
-        source.clear();
+
+        const seen = new Set<string>();
         for (const p of pts) {
-          if (typeof p.lon === 'number' && typeof p.lat === 'number') {
-            const feat = new Feature<Point>({ geometry: new Point(fromLonLat([p.lon, p.lat])) });
+          if (typeof p.lon !== 'number' || typeof p.lat !== 'number') continue;
+          const id: string = (p.icao24 && String(p.icao24)) || (p.callsign && String(p.callsign)) || '';
+          if (!id) continue;
+          seen.add(id);
+          let feat = allIndexRef.current.get(id);
+          const to = fromLonLat([p.lon, p.lat]) as [number, number];
+          if (!feat) {
+            feat = new Feature<Point>({ geometry: new Point(to) });
+            feat.set('icao24', p.icao24 || '');
             feat.set('callsign', p.callsign || '');
-            feat.set('lat', p.lat);
-            feat.set('lon', p.lon);
-            if (typeof p.alt === 'number') feat.set('alt', p.alt);
-            if (typeof p.track === 'number') feat.set('track', p.track);
-            if (typeof p.speed === 'number') feat.set('speed', p.speed);
             source.addFeature(feat);
+            allIndexRef.current.set(id, feat);
+          }
+          // Update properties
+          feat.set('lat', p.lat);
+          feat.set('lon', p.lon);
+          if (typeof p.alt === 'number') feat.set('alt', p.alt); else feat.unset('alt', true);
+          if (typeof p.track === 'number') feat.set('track', p.track); else feat.unset('track', true);
+          if (typeof p.speed === 'number') feat.set('speed', p.speed); else feat.unset('speed', true);
+          // Animate to new position
+          animateMove(feat, to);
+        }
+        // Remove features not seen in this update
+        for (const [id, feat] of allIndexRef.current.entries()) {
+          if (!seen.has(id)) {
+            const anyFeat = feat as any;
+            if (anyFeat.__animHandle) {
+              cancelAnimationFrame(anyFeat.__animHandle);
+              anyFeat.__animHandle = null;
+            }
+            source.removeFeature(feat);
+            allIndexRef.current.delete(id);
           }
         }
       } catch (e) {
@@ -563,6 +641,11 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       cancelled = true;
       map.un('moveend', onMoveEnd as any);
       if (timer) window.clearInterval(timer);
+      // cancel any running animations
+      for (const [, feat] of allIndexRef.current.entries()) {
+        const anyFeat = feat as any;
+        if (anyFeat.__animHandle) cancelAnimationFrame(anyFeat.__animHandle);
+      }
     };
   }, [callsign, theme]);
 
