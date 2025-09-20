@@ -118,6 +118,90 @@ body {
   color: var(--muted);
 }
 
+/* Bottom-right vertical stack for controls */
+.br-controls {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fab-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+.fab-btn i { font-size: 18px; }
+
+/* Reposition and restyle OpenLayers zoom control to match FAB buttons */
+.ol-zoom {
+  right: 16px !important;
+  bottom: 120px !important; /* above br-controls */
+  left: auto !important;
+  top: auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+}
+.ol-zoom button {
+  width: 48px !important;
+  height: 48px !important;
+  border-radius: 50% !important;
+  border: 1px solid var(--border) !important;
+  background: var(--bg-elev) !important;
+  color: var(--text) !important;
+  display: grid !important;
+  place-items: center !important;
+  box-shadow: var(--shadow) !important;
+  padding: 0 !important;
+  line-height: 1 !important;
+  font-size: 22px !important;
+}
+.ol-zoom button:hover {
+  filter: brightness(0.98);
+}
+.ol-zoom button:focus {
+  outline: 2px solid color-mix(in srgb, var(--primary), transparent 60%);
+}
+
+/* Layer switcher control */
+.layer-switch {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  padding: 4px;
+  border-radius: 10px;
+}
+.layer-switch .chip {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.layer-switch .chip i { font-size: 14px; }
+.layer-switch .chip.active {
+  background: var(--primary);
+  color: var(--primary-contrast);
+  border-color: var(--primary);
+}
+
 /* Responsive tweaks */
 @media (max-width: 640px) {
   .controls {
