@@ -1,20 +1,17 @@
-.PHONY: all build-backend build-ui build-app docker clean
+.PHONY: all frontend backend docker clean
 
-all: build-app
+all: frontend backend
 
-build-backend:
-	go build -mod=vendor ./backend ./monitoring
-
-build-ui:
+frontend:
 	cd frontend && npm ci && npm run build
 	rm -rf ui/build
 	cp -r frontend/build ui/
 
-build-app: build-ui
+backend:
 	cd cmd/miniflightradar && go build -mod=vendor -o ../../bin/mini-flightradar
 
 docker:
-	docker build -t mini-flightradar .
+	docker build -t miniflightradar .
 
 clean:
 	rm -rf bin/

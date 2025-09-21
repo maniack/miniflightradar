@@ -27,8 +27,9 @@
     "postcss": "^8.4.31"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
+    "prebuild": "node scripts/patch-fs-deprecation.js",
+    "start": "node scripts/patch-fs-deprecation.js && react-scripts start",
+    "build": "node scripts/patch-fs-deprecation.js && react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject"
   },

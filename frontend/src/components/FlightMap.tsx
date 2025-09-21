@@ -192,8 +192,16 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     mapRef.current = map;
 
-    // On first load, try to center on user's location
-    geolocate();
+    // On first load, center on user's location only if no callsign is present in the URL
+    try {
+      const u = new URL(window.location.href);
+      const q = (u.searchParams.get('q') || u.searchParams.get('callsign') || '').trim();
+      if (!q) {
+        geolocate();
+      }
+    } catch (_) {
+      geolocate();
+    }
 
     return () => {
       map.setTarget(undefined as unknown as string);
