@@ -7,6 +7,7 @@ const App: React.FC = () => {
   const [searchToken, setSearchToken] = useState(0);
   const [locateToken, setLocateToken] = useState(0);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('theme');
     if (stored === 'light' || stored === 'dark') return stored;
@@ -64,6 +65,7 @@ const App: React.FC = () => {
       if (cs && cs.trim()) {
         const up = cs.trim().toUpperCase();
         setCallsign(up);
+        setSubmitted(true);
         setSearchToken((x) => x + 1);
         // Migrate legacy param to ?q using replaceState (no history entry)
         if (!q && legacy) setURLCallsign(up, true);
@@ -83,6 +85,7 @@ const App: React.FC = () => {
         const cs = q || legacy || '';
         const up = cs ? cs.trim().toUpperCase() : '';
         setCallsign(up);
+        setSubmitted(!!up);
         setSearchToken((x) => x + 1);
       } catch (_) {
         // noop
@@ -107,6 +110,7 @@ const App: React.FC = () => {
     const up = callsign.trim().toUpperCase();
     setCallsign(up);
     setErrorMsg(null);
+    setSubmitted(true);
     setSearchToken((x) => x + 1);
     setURLCallsign(up, false);
   };
@@ -127,7 +131,18 @@ const App: React.FC = () => {
                 type="text"
                 placeholder="e.g. AAL100"
                 value={callsign}
-                onChange={(e) => { setErrorMsg(null); setCallsign(e.target.value.trim().toUpperCase()); }}
+                onChange={(e) => {
+                  setErrorMsg(null);
+                  const up = e.target.value.toUpperCase().trim();
+                  setCallsign(up);
+                  if (up === '') {
+                    // Clear selection and URL when input emptied
+                    setSubmitted(false);
+                    setURLCallsign(null, false);
+                  } else {
+                    setSubmitted(false);
+                  }
+                }}
               />
             </div>
             <button className="button search-btn" type="submit" disabled={!canSearch} aria-label="Search">
@@ -136,6 +151,20 @@ const App: React.FC = () => {
             </button>
           </form>
         </div>
+        {submitted && errorMsg && (
+          <div className="error-panel" role="alert" aria-live="assertive">
+            <div className="card" style={{ background: panelColors.bg, color: panelColors.fg, border: `1px solid ${panelColors.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', maxWidth: 520, width: 'min(92%, 520px)', padding: '10px 12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <i className="fa-solid fa-triangle-exclamation"></i>
+                  <strong>Flight not found</strong>
+                </div>
+                <button onClick={() => setErrorMsg(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{errorMsg}</div>
+            </div>
+          </div>
+        )}
 
         {/* Bottom-left controls: layer switcher */}
         <div className="bl-controls">
@@ -170,27 +199,20 @@ const App: React.FC = () => {
             const up = (cs || '').toString().trim().toUpperCase();
             setCallsign(up);
             setErrorMsg(null);
+            if (up === '') {
+              // Toggle off selection: clear URL query and submitted state
+              setSubmitted(false);
+              setURLCallsign(null, false);
+            } else {
+              setSubmitted(true);
+              setURLCallsign(up, false);
+            }
             setSearchToken((x) => x + 1);
-            setURLCallsign(up, false);
           }}
           onNotFound={(msg) => setErrorMsg(msg)}
           onFound={() => setErrorMsg(null)}
         />
 
-        {errorMsg && (
-          <div role="alert" aria-live="assertive" style={{ position: 'absolute', inset: 0, display: 'flex', justifyContent: 'center', alignItems: 'flex-start', paddingTop: 24, zIndex: 1000, pointerEvents: 'none' }}>
-            <div style={{ background: panelColors.bg, color: panelColors.fg, border: `1px solid ${panelColors.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', maxWidth: 520, width: 'min(92%, 520px)', padding: '12px 14px', pointerEvents: 'auto' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <i className="fa-solid fa-triangle-exclamation"></i>
-                  <strong>Flight not found</strong>
-                </div>
-                <button onClick={() => setErrorMsg(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
-              </div>
-              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{errorMsg}</div>
-            </div>
-          </div>
-        )}
 
         {/* Bottom-right controls: locate + theme toggle */}
         <div className="br-controls">

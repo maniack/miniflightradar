@@ -200,7 +200,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     };
   }, []);
 
-  // Setup tooltip overlay and pointer interactions
+  // Setup tooltip overlay, hover highlight, hover track preview, and click-to-select/toggle
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -235,6 +235,83 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;');
 
+    // Helpers for hover highlight & track preview (only in browse mode when no callsign is selected)
+    let hoverCS: string | null = null;
+    let hoverFeat: Feature<Point> | null = null;
+    let hoverTimer: number | null = null;
+    let hoverAbort: AbortController | null = null;
+
+    const clearHover = () => {
+      // Remove highlight style
+      if (hoverFeat) {
+        hoverFeat.setStyle(undefined as any);
+        hoverFeat = null;
+      }
+      hoverCS = null;
+      // Clear preview track (vector overlay)
+      const vs = vectorSourceRef.current;
+      if (vs) vs.clear();
+      trackFeatureRef.current = null;
+    };
+
+    const planeIconData = (fill: string, stroke: string) => {
+      const svg = `<?xml version="1.0" encoding="UTF-8"?>\n      <svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'>\n        <path d='M2 16l8-3V6.5A1.5 1.5 0 0 1 11.5 5h1A1.5 1.5 0 0 1 14 6.5V13l8 3v2l-8-1.5V22l-2-1-2 1v-5.5L2 18v-2z' fill='${fill}' stroke='${stroke}' stroke-width='1.5' stroke-linejoin='round' stroke-linecap='round'/>\n      </svg>`;
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+    };
+
+    const makeHoverStyle = (feature: Feature<Point>) => {
+      const th = theme;
+      const accent = th === 'dark' ? '#f59e0b' : '#1d4ed8';
+      const halo = th === 'dark' ? '#0b1220' : '#ffffff';
+      const trackDeg = (feature.get('track') as number) || 0;
+      const rot = trackDeg * Math.PI / 180;
+      const ring = new Style({
+        image: new CircleStyle({ radius: 12, stroke: new Stroke({ color: accent, width: 3 }), fill: new Fill({ color: th === 'dark' ? 'rgba(11,18,32,0.25)' : 'rgba(255,255,255,0.35)' }) })
+      });
+      const icon = new Style({ image: new Icon({ src: planeIconData(accent, halo), scale: 1.05, rotation: rot, rotateWithView: true }) });
+      return [ring, icon];
+    };
+
+    const getLineStyles = (th: 'light' | 'dark') => {
+      const accent = th === 'dark' ? '#f59e0b' : '#1d4ed8';
+      const halo = th === 'dark' ? '#0b1220' : '#ffffff';
+      return [
+        new Style({ stroke: new Stroke({ color: halo, width: 6, lineCap: 'round', lineJoin: 'round' }) }),
+        new Style({ stroke: new Stroke({ color: accent, width: 3, lineCap: 'round', lineJoin: 'round' }) }),
+      ];
+    };
+
+    const previewTrack = async (cs: string) => {
+      try {
+        hoverAbort?.abort();
+        hoverAbort = new AbortController();
+        const resp = await fetch(`/api/track?callsign=${encodeURIComponent(cs)}`, { signal: hoverAbort.signal });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        const pts = Array.isArray(data?.points) ? (data.points as Array<any>) : [];
+        if (!pts.length) return;
+        const lonlats: [number, number][] = pts.slice(-100).map((p: any) => [p.lon, p.lat]);
+        const coords = lonlats.map(([lo, la]) => fromLonLat([lo, la]));
+        const ls = new LineString(coords);
+        // Draw on overlay vector source
+        const vs = vectorSourceRef.current;
+        if (!vs) return;
+        vs.clear();
+        let tf = trackFeatureRef.current as Feature<LineString> | null;
+        if (!tf) {
+          tf = new Feature<LineString>({ geometry: ls });
+          tf.setStyle(getLineStyles(theme));
+          trackFeatureRef.current = tf as any;
+          vs.addFeature(tf);
+        } else {
+          tf.setGeometry(ls);
+          tf.setStyle(getLineStyles(theme));
+        }
+      } catch (_) {
+        // ignore aborts/errors
+      }
+    };
+
     const showTooltip = (feat: Feature<Geometry> | null) => {
       const el = tooltipElRef.current;
       const ov = overlayRef.current;
@@ -254,6 +331,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       const g = geom as Point;
       const [x, y] = g.getCoordinates();
       const cs = props.callsign || props.CALLSIGN || '';
+      const icao24 = String(props.icao24 || '')
       const lat = props.lat ?? props.latitude;
       const lon = props.lon ?? props.longitude;
       const alt = props.alt;
@@ -274,29 +352,79 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       const lonStr = typeof lon === 'number' ? lon.toFixed(4) : '';
       const altStr = typeof alt === 'number' ? `<br/>alt: ${Math.round(alt)} m` : '';
       const spdStr = typeof knots === 'number' ? `<br/>spd: ${knots} kt` : '';
+      // base content
       el.innerHTML = `<div><strong>${titleText}</strong><br/>lat: ${latStr}, lon: ${lonStr}${altStr}${spdStr}</div>`;
       el.style.display = 'block';
       ov.setPosition([x, y]);
+
     };
 
     const onMove = (evt: any) => {
-      const feat = hitAtPixel(evt.pixel);
-      showTooltip(feat as any);
+      const feat = hitAtPixel(evt.pixel) as Feature<Geometry> | null;
+      showTooltip(feat);
+
+      // Hover preview logic only when no flight is selected
+      if (!callsign) {
+        // If moved off any feature
+        if (!feat) {
+          if (hoverTimer) window.clearTimeout(hoverTimer);
+          hoverTimer = null;
+          clearHover();
+          return;
+        }
+        // Only for points in all-flights layer
+        const geomAny = (feat as any).getGeometry?.();
+        if (!geomAny || typeof geomAny.getType !== 'function' || geomAny.getType() !== 'Point') {
+          return;
+        }
+        const point = feat as Feature<Point>;
+        const cs = normalizeCallsign((point.get('callsign') as any) || (point.get('CALLSIGN') as any) || '');
+        if (!cs) {
+          return;
+        }
+        if (hoverCS === cs) {
+          return; // nothing changed
+        }
+        // New hover target: clear previous highlight and track
+        if (hoverTimer) window.clearTimeout(hoverTimer);
+        hoverTimer = null;
+        clearHover();
+        hoverCS = cs;
+        hoverFeat = point;
+        // Highlight feature
+        point.setStyle(makeHoverStyle(point) as any);
+        // Debounce track preview to avoid spamming
+        hoverTimer = window.setTimeout(() => {
+          if (hoverCS === cs) previewTrack(cs);
+        }, 180);
+      }
     };
+
     const onClick = (evt: any) => {
       const feat = hitAtPixel(evt.pixel) as any;
       if (feat && onSelectCallsign) {
-        const cs = feat.get('callsign') || feat.get('CALLSIGN');
-        if (cs) onSelectCallsign(String(cs));
+        const cs = normalizeCallsign((feat.get('callsign') || feat.get('CALLSIGN') || '')); 
+        if (!cs) return;
+        if (cs === normalizeCallsign(callsign)) {
+          // Second click on the same board -> clear selection and URL
+          onSelectCallsign('');
+        } else {
+          onSelectCallsign(String(cs));
+        }
       }
     };
+
     map.on('pointermove', onMove);
     map.on('singleclick', onClick);
+
     return () => {
+      if (hoverTimer) window.clearTimeout(hoverTimer);
+      hoverAbort?.abort();
+      clearHover();
       map.un('pointermove', onMove as any);
       map.un('singleclick', onClick as any);
     };
-  }, [onSelectCallsign]);
+  }, [onSelectCallsign, callsign, theme]);
 
   // Switch base layer according to theme and baseMode
   useEffect(() => {

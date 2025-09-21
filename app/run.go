@@ -20,12 +20,13 @@ import (
 // It wires up monitoring, storage, background ingestion and HTTP routing.
 // Security hardening: the server enables timeouts and sets basic security headers.
 func Run(ctx context.Context, c *cli.Command) error {
-	listen := c.String("listen")
-	enableMetrics := c.Bool("metrics")
-	tracingEndpoint := c.String("tracing")
-	retention := c.Duration("retention")
-	poll := c.Duration("interval")
-	proxy := c.String("proxy")
+	// Read flags using their canonical names to avoid alias lookup issues
+	listen := c.String("server.listen")
+	enableMetrics := c.Bool("metrics.enabled")
+	tracingEndpoint := c.String("tracing.endpoint")
+	retention := c.Duration("server.retention")
+	poll := c.Duration("server.interval")
+	proxy := c.String("server.proxy")
 
 	// Logging level (override env if flag provided)
 	if c.Bool("debug") {
@@ -51,6 +52,10 @@ func Run(ctx context.Context, c *cli.Command) error {
 	r := chi.NewRouter()
 	// Use Recoverer early to ensure panics are caught
 	r.Use(middleware.Recoverer)
+	// ETag middleware (compute over final encoded body); place outside of Compress
+	r.Use(monitoring.ETagMiddleware)
+	// Enable gzip/deflate compression for API and static responses
+	r.Use(middleware.Compress(5))
 	// Request timeout
 	r.Use(middleware.Timeout(15 * time.Second))
 	// Basic security headers

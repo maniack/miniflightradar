@@ -59,6 +59,22 @@ body {
   inset: 0;
 }
 
+/* Error panel overlay (top-center, above map and controls) */
+.error-panel {
+  position: absolute;
+  top: 72px; /* sit below the controls bar */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1200; /* higher than .controls (1000) and .br-controls (1100) */
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  pointer-events: none; /* let clicks fall through spacing; inner panel will handle its own clicks */
+}
+.error-panel > .card {
+  pointer-events: auto; /* enable interactions (close button) */
+}
+
 /* Controls overlay like Google Maps */
 .controls {
   position: absolute;

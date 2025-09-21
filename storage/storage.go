@@ -549,6 +549,30 @@ func init() {
 	}
 }
 
+// ConvertToIATAForPrefix returns IATA code for an ICAO airline prefix (3 letters), if known.
+func ConvertToIATAForPrefix(icao string) string {
+	icao = strings.ToUpper(strings.TrimSpace(icao))
+	if len(icao) != 3 {
+		return ""
+	}
+	if iata, ok := icaoToIata[icao]; ok {
+		return iata
+	}
+	return ""
+}
+
+// ConvertToICAOForPrefix returns ICAO code for an IATA airline prefix (2 letters), if known.
+func ConvertToICAOForPrefix(iata string) string {
+	iata = strings.ToUpper(strings.TrimSpace(iata))
+	if len(iata) != 2 {
+		return ""
+	}
+	if icao, ok := iataToIcao[iata]; ok {
+		return icao
+	}
+	return ""
+}
+
 // convertCallsignAlternate returns an alternate callsign form with airline code converted
 // between IATA (2-letter) and ICAO (3-letter). If no conversion is possible, returns empty string.
 func convertCallsignAlternate(cs string) string {

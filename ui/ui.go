@@ -52,11 +52,28 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p = "index.html"
 	}
 
+	setCacheHeaders := func(name string) {
+		nameLower := strings.ToLower(name)
+		if nameLower == "index.html" || strings.HasSuffix(nameLower, "/index.html") {
+			// Always revalidate the SPA shell
+			w.Header().Set("Cache-Control", "no-cache")
+			return
+		}
+		// Long cache for fingerprinted assets and static files
+		if strings.HasSuffix(nameLower, ".js") || strings.HasSuffix(nameLower, ".css") || strings.HasSuffix(nameLower, ".map") ||
+			strings.HasSuffix(nameLower, ".png") || strings.HasSuffix(nameLower, ".jpg") || strings.HasSuffix(nameLower, ".jpeg") ||
+			strings.HasSuffix(nameLower, ".svg") || strings.HasSuffix(nameLower, ".ico") || strings.HasSuffix(nameLower, ".json") ||
+			strings.HasSuffix(nameLower, ".txt") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		}
+	}
+
 	f, err := h.fsys.Open(p)
 	if err == nil {
 		defer f.Close()
 		fi, err := f.Stat()
 		if err == nil && !fi.IsDir() {
+			setCacheHeaders(p)
 			http.FileServer(h.fsys).ServeHTTP(w, r)
 			return
 		}
@@ -64,6 +81,7 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		idx := path.Join(p, "index.html")
 		if ff, err := h.fsys.Open(idx); err == nil {
 			ff.Close()
+			setCacheHeaders(idx)
 			r.URL.Path = "/" + idx
 			http.FileServer(h.fsys).ServeHTTP(w, r)
 			return
@@ -71,6 +89,7 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback: serve root index.html (SPA)
+	setCacheHeaders("index.html")
 	r.URL.Path = "/index.html"
 	http.FileServer(h.fsys).ServeHTTP(w, r)
 }

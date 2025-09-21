@@ -3,11 +3,15 @@
 package monitoring
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -15,6 +19,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -214,6 +219,22 @@ func MetricsMiddleware(next http.Handler) http.Handler {
 // PrometheusHandler exposes registered metrics.
 func PrometheusHandler() http.Handler { return promhttp.Handler() }
 
+// ============ Client helpers (tracing + metrics) ============
+
+// StartClientSpan starts an OpenTelemetry client span for an outbound HTTP request.
+// It sets common attributes like http.method and url and returns the span for the caller to end.
+func StartClientSpan(ctx context.Context, name, urlStr, method string) (context.Context, trace.Span) {
+	if method == "" {
+		method = "GET"
+	}
+	ctx, span := otel.Tracer("mini-flightradar-client").Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
+	span.SetAttributes(
+		semconv.HTTPMethodKey.String(method),
+		attribute.String("http.url", urlStr),
+	)
+	return ctx, span
+}
+
 // ============ Tracing ============
 
 var tracer = otel.Tracer("mini-flightradar-http")
@@ -320,6 +341,105 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 
 		log.Printf("http_request method=%s path=%q status=%d duration=%s remote=%s ua=%q trace_id=%s span_id=%s", r.Method, path, rr.status, dur, remote, ua, traceID, spanID)
 	})
+}
+
+// ETagMiddleware adds strong ETag handling for cacheable responses.
+// It buffers GET/HEAD responses (when no ETag already set), computes a SHA-256-based ETag
+// over the final response body (after compression if any), and serves 304 if If-None-Match matches.
+func ETagMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Only for idempotent cacheable methods
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// If handler explicitly sets ETag or Cache-Control: no-store, skip
+		if et := w.Header().Get("ETag"); et != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if cc := strings.ToLower(w.Header().Get("Cache-Control")); strings.Contains(cc, "no-store") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Record response
+		rec := &etagRecorder{w: w, header: make(http.Header), status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		// If non-200 or empty body (and not HEAD), just pass through
+		if rec.status != http.StatusOK || (r.Method != http.MethodHead && rec.buf.Len() == 0) {
+			copyHeaders(w.Header(), rec.header)
+			w.WriteHeader(rec.status)
+			if r.Method != http.MethodHead {
+				_, _ = w.Write(rec.buf.Bytes())
+			}
+			return
+		}
+
+		// Compute strong ETag over body we are going to send to client
+		sum := sha256.Sum256(rec.buf.Bytes())
+		etag := "\"" + hex.EncodeToString(sum[:]) + "\""
+
+		// Compare If-None-Match
+		if inm := r.Header.Get("If-None-Match"); inm != "" {
+			for _, cand := range strings.Split(inm, ",") {
+				if strings.TrimSpace(cand) == etag {
+					// Not modified
+					copyHeaders(w.Header(), rec.header)
+					w.Header().Set("ETag", etag)
+					w.Header().Add("Vary", "Accept-Encoding")
+					w.WriteHeader(http.StatusNotModified)
+					return
+				}
+			}
+		}
+
+		// Send with ETag
+		copyHeaders(w.Header(), rec.header)
+		w.Header().Set("ETag", etag)
+		w.Header().Add("Vary", "Accept-Encoding")
+		w.Header().Set("Content-Length", strconv.Itoa(rec.buf.Len()))
+		w.WriteHeader(rec.status)
+		if r.Method != http.MethodHead {
+			_, _ = w.Write(rec.buf.Bytes())
+		}
+	})
+}
+
+// etagRecorder captures response for ETag computation.
+type etagRecorder struct {
+	w           http.ResponseWriter
+	header      http.Header
+	buf         bytes.Buffer
+	status      int
+	wroteHeader bool
+}
+
+func (r *etagRecorder) Header() http.Header { return r.header }
+
+func (r *etagRecorder) WriteHeader(code int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
+	r.status = code
+}
+
+func (r *etagRecorder) Write(p []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.buf.Write(p)
+}
+
+// copyHeaders copies header kv pairs from src to dst (preserving existing ones)
+func copyHeaders(dst, src http.Header) {
+	for k, vv := range src {
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // clientIP tries to determine the real client IP.

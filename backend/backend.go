@@ -251,61 +251,62 @@ func FetchOpenSkyData() (*FlightData, error) {
 
 // IngestLoop periodically fetches from OpenSky and stores into BuntDB.
 func IngestLoop(stop <-chan struct{}) {
-	sleep := GetPollInterval()
-	if sleep <= 0 {
-		sleep = 10 * time.Second
+	fetchOnce := func() (nextSleep time.Duration) {
+		data, err := FetchOpenSkyData()
+		if err != nil {
+			if rl, ok := err.(*RateLimitError); ok {
+				// Respect server-provided Retry-After but never less than our polling interval
+				delay := rl.RetryAfter
+				min := GetPollInterval()
+				if min <= 0 {
+					min = 10 * time.Second
+				}
+				if delay < min {
+					delay = min
+				}
+				monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s applied_backoff=%s", rl.Status, rl.RetryAfter, delay)
+				// Extend TTL for current positions so markers don't disappear while backing off
+				if s := storage.Get(); s != nil {
+					buf := 5 * time.Second
+					_ = s.TouchNow(delay + buf)
+				}
+				return delay
+			}
+			monitoring.Debugf("ingestor fetch error: %v", err)
+			// On transient error, keep current positions visible until next poll attempt
+			if s := storage.Get(); s != nil {
+				d := GetPollInterval()
+				if d <= 0 {
+					d = 10 * time.Second
+				}
+				_ = s.TouchNow(d + 5*time.Second)
+			}
+			// On error, try again after normal interval
+			d := GetPollInterval()
+			if d <= 0 {
+				d = 10 * time.Second
+			}
+			return d
+		}
+		if data != nil {
+			_ = storage.Get().UpsertStates(data.States)
+			monitoring.Debugf("ingestor upserted states=%d", len(data.States))
+		}
+		d := GetPollInterval()
+		if d <= 0 {
+			d = 10 * time.Second
+		}
+		return d
 	}
+
+	// First fetch immediately to reduce startup latency
+	sleep := fetchOnce()
 	for {
 		select {
 		case <-stop:
 			return
 		case <-time.After(sleep):
-			data, err := FetchOpenSkyData()
-			if err != nil {
-				if rl, ok := err.(*RateLimitError); ok {
-					// Respect server-provided Retry-After but never less than our polling interval
-					delay := rl.RetryAfter
-					min := GetPollInterval()
-					if min <= 0 {
-						min = 10 * time.Second
-					}
-					if delay < min {
-						delay = min
-					}
-					monitoring.Debugf("ingestor rate-limited status=%d retry_after=%s applied_backoff=%s", rl.Status, rl.RetryAfter, delay)
-					// Extend TTL for current positions so markers don't disappear while backing off
-					if s := storage.Get(); s != nil {
-						buf := 5 * time.Second
-						_ = s.TouchNow(delay + buf)
-					}
-					sleep = delay
-					continue
-				}
-				monitoring.Debugf("ingestor fetch error: %v", err)
-				// On transient error, keep current positions visible until next poll attempt
-				if s := storage.Get(); s != nil {
-					d := GetPollInterval()
-					if d <= 0 {
-						d = 10 * time.Second
-					}
-					_ = s.TouchNow(d + 5*time.Second)
-				}
-				// On error, try again after normal interval
-				sleep = GetPollInterval()
-				if sleep <= 0 {
-					sleep = 10 * time.Second
-				}
-				continue
-			}
-			if data != nil {
-				_ = storage.Get().UpsertStates(data.States)
-				monitoring.Debugf("ingestor upserted states=%d", len(data.States))
-			}
-			// normal sleep
-			sleep = GetPollInterval()
-			if sleep <= 0 {
-				sleep = 10 * time.Second
-			}
+			sleep = fetchOnce()
 		}
 	}
 }
