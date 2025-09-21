@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	github_chi_mw "github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
@@ -308,6 +309,10 @@ func TracingMiddleware(next http.Handler) http.Handler {
 			semconv.HTTPMethodKey.String(r.Method),
 			semconv.URLPathKey.String(r.URL.Path),
 		)
+		// Attach request id as attribute when available
+		if rid := github_chi_mw.GetReqID(r.Context()); rid != "" {
+			span.SetAttributes(attribute.String("http.request_id", rid))
+		}
 
 		// Pass trace id to client for correlation
 		if sc := span.SpanContext(); sc.IsValid() {
@@ -338,8 +343,10 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 		if query != "" {
 			path = path + "?" + query
 		}
+		// Correlate with request id if present
+		rid := github_chi_mw.GetReqID(r.Context())
 
-		log.Printf("http_request method=%s path=%q status=%d duration=%s remote=%s ua=%q trace_id=%s span_id=%s", r.Method, path, rr.status, dur, remote, ua, traceID, spanID)
+		log.Printf("http_request method=%s path=%q status=%d duration=%s remote=%s ua=%q trace_id=%s span_id=%s request_id=%s", r.Method, path, rr.status, dur, remote, ua, traceID, spanID, rid)
 	})
 }
 
@@ -348,6 +355,11 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 // over the final response body (after compression if any), and serves 304 if If-None-Match matches.
 func ETagMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip WebSocket upgrade requests
+		if strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") || strings.ToLower(r.Header.Get("Upgrade")) == "websocket" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		// Only for idempotent cacheable methods
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			next.ServeHTTP(w, r)

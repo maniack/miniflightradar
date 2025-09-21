@@ -50,16 +50,26 @@ func Run(ctx context.Context, c *cli.Command) error {
 	go backend.IngestLoop(stop)
 
 	r := chi.NewRouter()
-	// Use Recoverer early to ensure panics are caught
+	// Global minimal middlewares (must be added before any routes on this mux)
+	// Keep only ones that don't wrap ResponseWriter in a way that breaks Hijacker.
 	r.Use(middleware.Recoverer)
-	// ETag middleware (compute over final encoded body); place outside of Compress
-	r.Use(monitoring.ETagMiddleware)
+	// Global ETag over compressed bytes (Compress is applied on subrouter)
+	r.Use(monitoring.ETagMiddleware) // placed outside of Compress (on subrouter) so ETag is over compressed bytes
+	// Generate a unique request ID for each request and expose it via X-Request-ID
+	r.Use(middleware.RequestID)
+
+	// WebSocket endpoint on the root router without extra wrapping middlewares
+	// to ensure http.Hijacker works during upgrade.
+	r.Get("/ws/flights", backend.FlightsWSHandler)
+
+	// Subrouter for regular HTTP routes with full middleware stack
+	api := chi.NewRouter()
 	// Enable gzip/deflate compression for API and static responses
-	r.Use(middleware.Compress(5))
+	api.Use(middleware.Compress(5))
 	// Request timeout
-	r.Use(middleware.Timeout(15 * time.Second))
+	api.Use(middleware.Timeout(15 * time.Second))
 	// Basic security headers
-	r.Use(func(next http.Handler) http.Handler {
+	api.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("X-Frame-Options", "DENY")
@@ -70,19 +80,22 @@ func Run(ctx context.Context, c *cli.Command) error {
 		})
 	})
 	// Tracing before logging to ensure trace IDs are present
-	r.Use(monitoring.TracingMiddleware)
+	api.Use(monitoring.TracingMiddleware)
 	// Metrics and structured logging
-	r.Use(monitoring.MetricsMiddleware)
-	r.Use(monitoring.LoggingMiddleware)
+	api.Use(monitoring.MetricsMiddleware)
+	api.Use(monitoring.LoggingMiddleware)
 
 	if enableMetrics {
-		r.Handle("/metrics", monitoring.PrometheusHandler())
+		api.Handle("/metrics", monitoring.PrometheusHandler())
 	}
 
-	r.Get("/api/flight", monitoring.InstrumentedFlightHandler(backend.FlightHandler))
-	r.Get("/api/flights", backend.FlightsInBBoxHandler)
-	r.Get("/api/track", backend.TrackHandler)
-	r.Handle("/*", ui.Handler())
+	// HTTP fallback: all flights (frontend filters)
+	api.Get("/api/flights", backend.AllFlightsHandler)
+	// UI
+	api.Handle("/*", ui.Handler())
+
+	// Mount the API subrouter under root (after defining its middlewares and routes)
+	r.Mount("/", api)
 
 	log.Printf("Server listening on %s\n", listen)
 	srv := &http.Server{

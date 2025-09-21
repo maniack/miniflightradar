@@ -606,3 +606,71 @@ func convertCallsignAlternate(cs string) string {
 	}
 	return ""
 }
+
+// CurrentAll returns latest non-landed points worldwide.
+func (s *Store) CurrentAll() ([]Point, error) {
+	if s == nil {
+		return nil, errors.New("store not initialized")
+	}
+	pts := []Point{}
+	_ = s.db.View(func(tx *buntdb.Tx) error {
+		_ = tx.AscendKeys("now:*", func(key, val string) bool {
+			var p Point
+			if json.Unmarshal([]byte(val), &p) == nil {
+				pts = append(pts, p)
+			}
+			return true
+		})
+		return nil
+	})
+	// Filter out flights that have likely landed (same heuristic as in CurrentInBBox)
+	out := make([]Point, 0, len(pts))
+	for _, p := range pts {
+		landed, _ := s.IsLandedWithin(p.Icao24, 10*time.Minute)
+		if landed {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// RecentTrackByICAO returns up to 'limit' most recent points for given ICAO within 'window'.
+// Points are returned in ascending time order.
+func (s *Store) RecentTrackByICAO(icao string, limit int, window time.Duration) ([]Point, error) {
+	if s == nil {
+		return nil, errors.New("store not initialized")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if window <= 0 {
+		window = 45 * time.Minute
+	}
+	icao = normalizeICAO(icao)
+	pts := make([]Point, 0, limit)
+	err := s.db.View(func(tx *buntdb.Tx) error {
+		prefix := fmt.Sprintf("pos:%s:", icao)
+		cutoff := time.Now().Add(-window).Unix()
+		_ = tx.DescendKeys(prefix+"*", func(key, val string) bool {
+			var p Point
+			if json.Unmarshal([]byte(val), &p) != nil {
+				return true
+			}
+			if p.TS < cutoff {
+				return false
+			}
+			pts = append(pts, p)
+			return len(pts) < limit
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	// reverse to ascending time
+	for i, j := 0, len(pts)-1; i < j; i, j = i+1, j-1 {
+		pts[i], pts[j] = pts[j], pts[i]
+	}
+	return pts, nil
+}

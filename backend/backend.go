@@ -469,3 +469,14 @@ func TrackHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// AllFlightsHandler returns all current flights positions (worldwide). Frontend handles any filtering.
+func AllFlightsHandler(w http.ResponseWriter, r *http.Request) {
+	pts, err := storage.Get().CurrentAll()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(pts)
+}
