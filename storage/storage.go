@@ -60,15 +60,17 @@ func (s *Store) TouchNow(ttl time.Duration) error {
 var store *Store
 
 // Open opens a persistent BuntDB file on disk and configures retention.
-// DB file: ./data/flight.buntdb (directory will be created if missing).
-func Open(retention time.Duration) (*Store, error) {
+// If path is empty, it defaults to ./data/flight.buntdb (directory will be created if missing).
+func Open(path string, retention time.Duration) (*Store, error) {
 	if retention <= 0 {
 		retention = 7 * 24 * time.Hour
 	}
-	// Ensure data directory exists
-	dataDir := filepath.Join(".", "data")
-	_ = os.MkdirAll(dataDir, 0o755)
-	path := filepath.Join(dataDir, "flight.buntdb")
+	if strings.TrimSpace(path) == "" {
+		// default path
+		path = filepath.Join(".", "data", "flight.buntdb")
+	}
+	// Ensure parent directory exists
+	_ = os.MkdirAll(filepath.Dir(path), 0o755)
 
 	db, err := buntdb.Open(path)
 	if err != nil {

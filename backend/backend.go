@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,8 +32,17 @@ var (
 
 	// HTTP client/proxy configuration
 	proxyOverride string
+	noProxyList   string
+	// CLI-sourced Linux-style proxies (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY)
+	envHTTPProxy  string
+	envHTTPSProxy string
+	envALLProxy   string
 	clientMu      sync.Mutex
 	httpClient    *http.Client
+
+	// OpenSky credentials (optional)
+	openskyUser string
+	openskyPass string
 
 	// update broadcast to notify WS writers about new ingested data
 	updatesMu   sync.Mutex
@@ -99,20 +107,40 @@ func SetProxy(p string) {
 	httpClient = nil
 }
 
-// noProxyMatch reports whether host should bypass proxy according to NO_PROXY/no_proxy env.
+// SetNoProxy sets a comma-separated NO_PROXY list (CLI-provided). Empty disables bypass rules.
+func SetNoProxy(list string) {
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	noProxyList = strings.TrimSpace(list)
+	// reset client to rebuild with new proxy settings on next use
+	httpClient = nil
+}
+
+// SetEnvProxies configures per-scheme proxies provided via CLI/env flags (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY)
+func SetEnvProxies(httpP, httpsP, allP string) {
+	clientMu.Lock()
+	defer clientMu.Unlock()
+	envHTTPProxy = strings.TrimSpace(httpP)
+	envHTTPSProxy = strings.TrimSpace(httpsP)
+	envALLProxy = strings.TrimSpace(allP)
+	// reset client to rebuild with new proxy settings on next use
+	httpClient = nil
+}
+
+// SetOpenSkyCredentials configures Basic Auth for OpenSky API.
+func SetOpenSkyCredentials(user, pass string) {
+	openskyUser = strings.TrimSpace(user)
+	openskyPass = pass
+}
+
+// noProxyMatch reports whether host should bypass proxy according to configured NO_PROXY list.
 func noProxyMatch(host string) bool {
-	if host == "" {
+	if host == "" || strings.TrimSpace(noProxyList) == "" {
 		return false
 	}
-	noProxy := os.Getenv("NO_PROXY")
-	if noProxy == "" {
-		noProxy = os.Getenv("no_proxy")
-	}
-	if noProxy == "" {
-		return false
-	}
+	list := noProxyList
 	host = strings.ToLower(host)
-	for _, token := range strings.Split(noProxy, ",") {
+	for _, token := range strings.Split(list, ",") {
 		t := strings.ToLower(strings.TrimSpace(token))
 		if t == "" {
 			continue
@@ -143,7 +171,7 @@ func noProxyMatch(host string) bool {
 	return false
 }
 
-// buildHTTPClient builds (once) an HTTP client honoring CLI proxy override and environment proxies.
+// buildHTTPClient builds (once) an HTTP client honoring CLI proxy override and per-scheme proxies (HTTP/HTTPS/ALL) provided via urfave/cli.
 func buildHTTPClient(target string) *http.Client {
 	clientMu.Lock()
 	defer clientMu.Unlock()
@@ -170,7 +198,7 @@ func buildHTTPClient(target string) *http.Client {
 	}
 
 	if proxyOverride != "" {
-		source = "cli"
+		source = "cli-override"
 		purl, err := url.Parse(proxyOverride)
 		if err == nil && purl.Host != "" {
 			bypass = noProxyMatch(thost)
@@ -186,13 +214,59 @@ func buildHTTPClient(target string) *http.Client {
 			}
 		}
 	} else {
-		// Environment (honors http_proxy/https_proxy/all_proxy/no_proxy)
-		source = "env"
-		tr.Proxy = http.ProxyFromEnvironment
-		if req, _ := http.NewRequest("GET", target, nil); req != nil {
-			if purl, _ := http.ProxyFromEnvironment(req); purl != nil {
-				mode = strings.ToLower(purl.Scheme)
+		// Use CLI-provided per-scheme proxies (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) and NO_PROXY
+		source = "cli-env"
+		tr.Proxy = func(req *http.Request) (*url.URL, error) {
+			if req == nil || req.URL == nil {
+				return nil, nil
 			}
+			if noProxyMatch(req.URL.Hostname()) {
+				return nil, nil
+			}
+			var candidate string
+			scheme := strings.ToLower(req.URL.Scheme)
+			if scheme == "https" && envHTTPSProxy != "" {
+				candidate = envHTTPSProxy
+			} else if scheme == "http" && envHTTPProxy != "" {
+				candidate = envHTTPProxy
+			} else if envALLProxy != "" {
+				candidate = envALLProxy
+			}
+			if candidate == "" {
+				return nil, nil
+			}
+			purl, err := url.Parse(candidate)
+			if err != nil || purl.Host == "" {
+				return nil, nil
+			}
+			return purl, nil
+		}
+
+		// For logging purpose only, try to infer mode based on target URL
+		if u, err := url.Parse(target); err == nil {
+			if u.Scheme == "https" && envHTTPSProxy != "" {
+				mode = strings.ToLower(func() string {
+					if pu, e := url.Parse(envHTTPSProxy); e == nil {
+						return pu.Scheme
+					}
+					return "https"
+				}())
+			} else if u.Scheme == "http" && envHTTPProxy != "" {
+				mode = strings.ToLower(func() string {
+					if pu, e := url.Parse(envHTTPProxy); e == nil {
+						return pu.Scheme
+					}
+					return "http"
+				}())
+			} else if envALLProxy != "" {
+				mode = strings.ToLower(func() string {
+					if pu, e := url.Parse(envALLProxy); e == nil {
+						return pu.Scheme
+					}
+					return "http"
+				}())
+			}
+			bypass = noProxyMatch(u.Hostname())
 		}
 	}
 
@@ -231,13 +305,13 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 // FetchOpenSkyData calls OpenSky /api/states/all and returns parsed states.
-// If environment variables OPENSKY_USER and OPENSKY_PASS are set, it uses Basic Auth.
+// If credentials were configured via CLI, it uses Basic Auth.
 func FetchOpenSkyData() (*FlightData, error) {
 	url := "https://opensky-network.org/api/states/all"
 	client := buildHTTPClient(url)
 
 	// Auth for faster quota if available; TTL driven by configured poll interval
-	u, p := os.Getenv("OPENSKY_USER"), os.Getenv("OPENSKY_PASS")
+	u, p := openskyUser, openskyPass
 	auth := u != "" && p != ""
 	ttl := GetPollInterval()
 	if ttl <= 0 {

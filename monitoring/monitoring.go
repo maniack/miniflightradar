@@ -10,7 +10,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -122,8 +121,8 @@ func init() {
 		HTTPDuration,
 	)
 
-	// default from env
-	ConfigureLogLevelFromEnv()
+	// default log level
+	SetLogLevel("info")
 }
 
 // Logging level helpers
@@ -140,18 +139,6 @@ func SetLogLevel(level string) {
 		atomic.StoreInt32(&logLevel, 0)
 		log.Printf("log_level=info (unknown level %q)", level)
 	}
-}
-
-func ConfigureLogLevelFromEnv() {
-	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
-		SetLogLevel(lvl)
-		return
-	}
-	if d := strings.ToLower(os.Getenv("DEBUG")); d == "1" || d == "true" || d == "yes" {
-		SetLogLevel("debug")
-		return
-	}
-	SetLogLevel("info")
 }
 
 func IsDebug() bool { return atomic.LoadInt32(&logLevel) == 1 }

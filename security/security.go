@@ -18,23 +18,34 @@ import (
 // === Minimal JWT (HS256) + CSRF + CORS helpers ===
 
 var (
-	jwtSecret []byte
+	jwtSecret         []byte
+	jwtSecretFromCLI  string
+	jwtSecretFilePath string
 )
 
-// InitAuth initializes JWT secret from env JWT_SECRET or a persistent file.
+// ConfigureJWT sets CLI-provided secret or persistent file path for JWT secret management.
+// If secret is non-empty, it will be used directly. Otherwise, secret will be loaded from file (or generated and persisted).
+func ConfigureJWT(secret, file string) {
+	jwtSecretFromCLI = strings.TrimSpace(secret)
+	jwtSecretFilePath = strings.TrimSpace(file)
+	// reset current secret; next InitAuth will re-evaluate
+	jwtSecret = nil
+}
+
+// InitAuth initializes JWT secret from CLI configuration or a persistent file.
 // If neither is present, it generates a new one and stores it under ./data/jwt.secret
 // so that sessions survive application restarts.
 func InitAuth() {
 	if len(jwtSecret) != 0 {
 		return
 	}
-	// 1) Environment has priority
-	if sec := strings.TrimSpace(os.Getenv("JWT_SECRET")); sec != "" {
+	// 1) CLI-provided secret has priority
+	if sec := strings.TrimSpace(jwtSecretFromCLI); sec != "" {
 		jwtSecret = []byte(sec)
 		return
 	}
-	// 2) Persistent file (can be overridden via JWT_SECRET_FILE)
-	path := strings.TrimSpace(os.Getenv("JWT_SECRET_FILE"))
+	// 2) Persistent file (path may be provided via CLI)
+	path := strings.TrimSpace(jwtSecretFilePath)
 	if path == "" {
 		path = filepath.Join(".", "data", "jwt.secret")
 	}

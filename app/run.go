@@ -23,10 +23,9 @@ import (
 func Run(ctx context.Context, c *cli.Command) error {
 	// Read flags using their canonical names to avoid alias lookup issues
 	listen := c.String("server.listen")
-	enableMetrics := c.Bool("metrics.enabled")
 	tracingEndpoint := c.String("tracing.endpoint")
-	retention := c.Duration("server.retention")
-	poll := c.Duration("server.interval")
+	retention := c.Duration("opensky.retention")
+	poll := c.Duration("opensky.interval")
 	proxy := c.String("server.proxy")
 
 	// Logging level (override env if flag provided)
@@ -38,17 +37,22 @@ func Run(ctx context.Context, c *cli.Command) error {
 	shutdownTracer := monitoring.InitTracer(tracingEndpoint, "mini-flightradar")
 	defer shutdownTracer()
 
-	// Initialize auth (loads/persists JWT secret) early so WS path can validate immediately
+	// Configure and initialize auth (loads/persists JWT secret) early so WS path can validate immediately
+	security.ConfigureJWT(c.String("security.jwt.secret"), c.String("security.jwt.file"))
 	security.InitAuth()
 
 	// Open storage and start ingestor
-	if _, err := storage.Open(retention); err != nil {
+	if _, err := storage.Open(c.String("storage.path"), retention); err != nil {
 		log.Printf("failed to open storage: %v", err)
 	}
 	// Configure poll interval
 	backend.SetPollInterval(poll)
 	// Configure proxy for backend HTTP client
 	backend.SetProxy(proxy)
+	backend.SetEnvProxies(c.String("net.http_proxy"), c.String("net.https_proxy"), c.String("net.all_proxy"))
+	backend.SetNoProxy(c.String("net.no_proxy"))
+	// Configure OpenSky credentials
+	backend.SetOpenSkyCredentials(c.String("opensky.user"), c.String("opensky.pass"))
 
 	stop := make(chan struct{})
 	go backend.IngestLoop(stop)
@@ -94,9 +98,7 @@ func Run(ctx context.Context, c *cli.Command) error {
 	api.Use(monitoring.MetricsMiddleware)
 	api.Use(monitoring.LoggingMiddleware)
 
-	if enableMetrics {
-		api.Handle("/metrics", monitoring.PrometheusHandler())
-	}
+	api.Handle("/metrics", monitoring.PrometheusHandler())
 
 	// HTTP fallback: all flights (frontend filters)
 	api.Get("/api/flights", backend.AllFlightsHandler)

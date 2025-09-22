@@ -51,11 +51,11 @@ docker run --rm -p 8080:8080 --name minifr mini-flightradar
 ## Переменные окружения и флаги
 
 - --listen или LISTEN — адрес для HTTP-сервера (по умолчанию :8080)
-- --metrics — включить экспонирование метрик Prometheus (по умолчанию true), метрики на /metrics
 - --tracing (или -t) либо переменная OTEL_ENDPOINT — адрес OTEL-коллектора для отправки трейсинга (опционально)
-- --history.retention (или --retention) — период хранения истории полётов в BuntDB, формат duration (по умолчанию 168h = 1 неделя)
-- --server.interval (или --interval) — интервал опроса OpenSky API, формат duration (по умолчанию 10s)
-- --server.proxy (или --proxy, -x) — URL прокси для запросов к внешним API (OpenSky). Поддерживаются схемы http, https, socks5. Пример: `--proxy socks5://127.0.0.1:1080`. Если флаг не задан, используются стандартные переменные окружения: `http_proxy`, `https_proxy`, `all_proxy`, `no_proxy` (как в curl).
+- --opensky.retention (или --retention, -r) — период хранения истории полётов в BuntDB, формат duration (по умолчанию 168h = 1 неделя)
+- --opensky.interval (или --interval, -i) — интервал опроса OpenSky API, формат duration (по умолчанию 60s)
+- --server.proxy (или --proxy, -x) — URL прокси для запросов к внешним API (OpenSky). Поддерживаются схемы http, https, socks5. Пример: `--proxy socks5://127.0.0.1:1080`. Если флаг не задан, используются стандартные переменные окружения: `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` и `NO_PROXY`.
+- --storage.path (или --db) — путь к файлу базы BuntDB (по умолчанию ./data/flight.buntdb)
 - --debug (или переменная окружения DEBUG=true) — включить подробное debug‑логирование по всему приложению
 
 ## Что есть внутри
@@ -124,7 +124,7 @@ docker run --rm -p 8080:8080 --name minifr mini-flightradar
 
 ## Ограничения OpenSky и бэкофф
 
-- Частота опроса OpenSky задаётся флагом `--server.interval` (по умолчанию 10s).
+- Частота опроса OpenSky задаётся флагом `--opensky.interval` (по умолчанию 10s).
 - При превышении лимита запросов сервер обрабатывает ответы `429 Too Many Requests`/`503 Service Unavailable` и автоматически откладывает следующий запрос согласно заголовку `Retry-After` (если есть) или на разумный интервал по умолчанию.
 - При наличии учётных данных (`OPENSKY_USER`/`OPENSKY_PASS`) используется Basic Auth, что может повысить доступные лимиты.
 
