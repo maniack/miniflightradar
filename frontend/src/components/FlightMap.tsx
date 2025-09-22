@@ -12,6 +12,8 @@ import Point from "ol/geom/Point";
 import LineString from "ol/geom/LineString";
 import type { Geometry } from "ol/geom";
 import { fromLonLat, transformExtent } from "ol/proj";
+import { toLonLat } from "ol/proj";
+import { startUISpan, addEvent, withSpan } from '../otel-ui';
 import Style from "ol/style/Style";
 import CircleStyle from "ol/style/Circle";
 import Fill from "ol/style/Fill";
@@ -80,9 +82,14 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   // Source/layer for tracked flight + its track (on top)
   const flightFeatureRef = useRef<Feature<Point> | null>(null);
   const trackFeatureRef = useRef<Feature<LineString> | null>(null);
+  // Hover preview track feature (separate from selected flight track)
+  const hoverTrackFeatureRef = useRef<Feature<LineString> | null>(null);
   // Source/layer for all flights in viewport (underneath)
   const allSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   const allLayerRef = useRef<VectorLayer<Feature<Geometry>> | null>(null);
+  // Dedicated layer/source for tracks drawn under plane icons (hover previews etc.)
+  const tracksSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
+  const tracksLayerRef = useRef<VectorLayer<Feature<Geometry>> | null>(null);
   // Index of all-flights features keyed by id (icao24 or callsign)
   const allIndexRef = useRef<Map<string, Feature<Point>>>(new Map());
   const baseOSMLightRef = useRef<TileLayer<any> | null>(null);
@@ -178,12 +185,15 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     const allLayer = new VectorLayer({ source: allSourceRef.current });
     allLayerRef.current = allLayer;
 
+    const tracksLayer = new VectorLayer({ source: tracksSourceRef.current });
+    tracksLayerRef.current = tracksLayer;
+
     const vectorLayer = new VectorLayer({ source: vectorSourceRef.current });
     vectorLayerRef.current = vectorLayer;
 
     const map = new OlMap({
       target: "map",
-      layers: [osmLight, osmDark, hybImagery, hybLabelsPlaces, hybLabelsTransport, allLayer, vectorLayer],
+      layers: [osmLight, osmDark, hybImagery, hybLabelsPlaces, hybLabelsTransport, tracksLayer, allLayer, vectorLayer],
       view: new View({
         center: fromLonLat([0, 20]),
         zoom: 2,
@@ -256,10 +266,10 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         hoverFeat = null;
       }
       hoverCS = null;
-      // Clear preview track (vector overlay)
-      const vs = vectorSourceRef.current;
+      // Clear preview track (drawn on dedicated tracks layer under planes)
+      const vs = tracksSourceRef.current;
       if (vs) vs.clear();
-      trackFeatureRef.current = null;
+      hoverTrackFeatureRef.current = null;
     };
 
     const planeIconData = (fill: string, stroke: string) => {
@@ -296,14 +306,14 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         const lonlats: [number, number][] = trail.slice(-100).map((p: any) => [p.lon, p.lat]);
         const coords = lonlats.map(([lo, la]) => fromLonLat([lo, la]));
         const ls = new LineString(coords);
-        const vs = vectorSourceRef.current;
+        const vs = tracksSourceRef.current;
         if (!vs) return;
         vs.clear();
-        let tf = trackFeatureRef.current as Feature<LineString> | null;
+        let tf = hoverTrackFeatureRef.current as Feature<LineString> | null;
         if (!tf) {
           tf = new Feature<LineString>({ geometry: ls });
           tf.setStyle(getLineStyles(theme));
-          trackFeatureRef.current = tf as any;
+          hoverTrackFeatureRef.current = tf as any;
           vs.addFeature(tf);
         } else {
           tf.setGeometry(ls);
@@ -403,16 +413,33 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     };
 
     const onClick = (evt: any) => {
-      const feat = hitAtPixel(evt.pixel) as any;
-      if (feat && onSelectCallsign) {
-        const cs = normalizeCallsign((feat.get('callsign') || feat.get('CALLSIGN') || '')); 
-        if (!cs) return;
-        if (cs === normalizeCallsign(callsign)) {
-          // Second click on the same board -> clear selection and URL
-          onSelectCallsign('');
-        } else {
-          onSelectCallsign(String(cs));
+      try {
+        const map = mapRef.current;
+        const view = map?.getView();
+        const coord3857 = map?.getCoordinateFromPixel ? map.getCoordinateFromPixel(evt.pixel) : (evt.coordinate || null);
+        const [lon, lat] = coord3857 ? toLonLat(coord3857) : [undefined, undefined];
+        const zoom = view?.getZoom?.();
+        const { end, span } = startUISpan('ui.map.click', {
+          lon: typeof lon === 'number' ? Number(lon.toFixed(6)) : undefined,
+          lat: typeof lat === 'number' ? Number(lat.toFixed(6)) : undefined,
+          zoom: typeof zoom === 'number' ? zoom : undefined,
+          has_callsign: !!callsign,
+        });
+        const feat = hitAtPixel(evt.pixel) as any;
+        if (feat && onSelectCallsign) {
+          const cs = normalizeCallsign((feat.get('callsign') || feat.get('CALLSIGN') || ''));
+          if (!cs) { end(); return; }
+          if (cs === normalizeCallsign(callsign)) {
+            addEvent(span, 'select.toggle', { action: 'clear', callsign: cs });
+            onSelectCallsign('');
+          } else {
+            addEvent(span, 'select.toggle', { action: 'select', callsign: cs });
+            onSelectCallsign(String(cs));
+          }
         }
+        end();
+      } catch (_) {
+        // fallthrough
       }
     };
 
@@ -571,6 +598,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       } else {
         // Update meta
         const ff = f as Feature<Point>;
+        // Capture previous timestamp to compute smooth duration
+        const oldTs = Number(ff.get('ts') || 0);
         ff.set('lat', lat);
         ff.set('lon', lon);
         if (typeof alt === 'number') ff.set('alt', alt);
@@ -583,15 +612,16 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         // Update style rotation
         const rot2 = ((ff.get('track') as number) || 0) * Math.PI / 180;
         ff.setStyle(getPointStyle(theme, rot2));
-        // Animate to the new sampled position (no predictive motion)
+        // Animate to the new sampled position with duration based on ts delta
         const geom = ff.getGeometry() as Point;
         const curXY = geom.getCoordinates() as [number, number];
         const prevRaf = (ff.get('__animRaf') as number) || 0;
         if (prevRaf) cancelAnimationFrame(prevRaf);
         const start = performance.now();
         const fromXY = curXY.slice() as [number, number];
-        const dur = 700;
-        const ease = (t: number) => 1 - Math.pow(1 - t, 3);
+        const deltaSec = (typeof tsSec === 'number' && oldTs > 0) ? Math.max(0.8, Math.min(15, tsSec - oldTs)) : 10;
+        const dur = Math.round(deltaSec * 1000);
+        const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
         const step = (now: number) => {
           let t = (now - start) / dur;
           if (t >= 1) {
@@ -664,9 +694,19 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       return;
     }
 
+    // APM: Track flight lifecycle span
+    const track = startUISpan('ui.track.flight', { callsign, token: searchToken });
+    let foundLogged = false;
+
     // Predictive animation removed
     // Initial sync from global stream and periodic refresh
-    const doSync = () => { syncFromGlobal(); if (!cancelled && flightFeatureRef.current) { onFound && onFound(); } };
+    const doSync = () => {
+      syncFromGlobal();
+      if (!cancelled && flightFeatureRef.current) {
+        if (!foundLogged) { try { addEvent(track.span, 'found'); } catch {} ; foundLogged = true; }
+        onFound && onFound();
+      }
+    };
     doSync();
     let checkTimer: number | null = window.setInterval(doSync, 1000);
 
@@ -683,6 +723,15 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
   }, [callsign, searchToken]);
+
+  const getCsrfTokenFromCookie = (): string => {
+    try {
+      const m = document.cookie.match(/(?:^|; )mfr_csrf=([^;]+)/);
+      return m ? decodeURIComponent(m[1]) : '';
+    } catch {
+      return '';
+    }
+  };
 
   // Browse mode: show all flights within current viewport when no callsign
   useEffect(() => {
@@ -859,7 +908,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       if (callsign) return; // only in browse mode
       if (!map.getSize()) return;
       try {
-        const resp = await fetch(`/api/flights`);
+        const csrf = getCsrfTokenFromCookie();
+        const resp = await fetch(`/api/flights`, { credentials: 'include', headers: csrf ? { 'X-CSRF-Token': csrf } : {} });
         if (!resp.ok) return;
         const pts = await resp.json(); // array of {icao24,callsign,lon,lat,alt?,track?,speed?,ts}
         if (cancelled) return;
@@ -892,21 +942,31 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       if (!bbox) return;
       try {
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-        const url = `${proto}://${window.location.host}/ws/flights`;
+        const token = getCsrfTokenFromCookie();
+        const url = `${proto}://${window.location.host}/ws/flights${token ? `?csrf=${encodeURIComponent(token)}` : ''}`;
+        const conn = startUISpan('ws.connect', { url, mode: callsign ? 'track' : 'browse' });
         ws = new WebSocket(url);
+        ws.onopen = () => { try { addEvent(conn.span, 'open'); conn.end({ ok: true }); } catch {} };
         ws.onmessage = async (ev) => {
-          try {
-            const pts = JSON.parse(ev.data);
-            if (!Array.isArray(pts)) return;
-            processPoints(pts);
-            await saveSnapshotNow(pts);
-          } catch (_) {}
+          await withSpan('ws.message.batch', async (span) => {
+            try {
+              const pts = JSON.parse(ev.data);
+              if (!Array.isArray(pts)) return;
+              addEvent(span, 'received', { count: pts.length });
+              processPoints(pts);
+              await saveSnapshotNow(pts);
+            } catch (e) {
+              // ignore parse errors
+            }
+          }, { mode: callsign ? 'track' : 'browse' });
         };
         ws.onclose = () => {
+          try { addEvent(conn.span, 'close'); } catch {}
           if (reconnectTimer) window.clearTimeout(reconnectTimer);
           reconnectTimer = window.setTimeout(() => subscribe(), 2500);
         };
         ws.onerror = () => {
+          try { addEvent(conn.span, 'error'); conn.end({ ok: false }); } catch {}
           try { ws && ws.close(); } catch (_) {}
         };
       } catch (_) {
@@ -918,6 +978,22 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     layer.setVisible(!callsign);
 
     const onMoveEnd = () => {
+      try {
+        const map = mapRef.current;
+        const view = map?.getView();
+        const c = view?.getCenter?.();
+        const [lon, lat] = c ? toLonLat(c) : [undefined, undefined];
+        const zoom = view?.getZoom?.();
+        const extent = view?.calculateExtent ? view.calculateExtent(map?.getSize() || [0,0]) : null;
+        const bbox = extent ? transformExtent(extent, 'EPSG:3857', 'EPSG:4326') : null;
+        const { end } = startUISpan('ui.map.moveend', {
+          lon: typeof lon === 'number' ? Number(lon.toFixed(6)) : undefined,
+          lat: typeof lat === 'number' ? Number(lat.toFixed(6)) : undefined,
+          zoom: typeof zoom === 'number' ? zoom : undefined,
+          bbox: bbox ? `${bbox[0].toFixed(4)},${bbox[1].toFixed(4)},${bbox[2].toFixed(4)},${bbox[3].toFixed(4)}` : undefined,
+        });
+        end();
+      } catch {}
       if (resubTimer) window.clearTimeout(resubTimer);
       resubTimer = window.setTimeout(() => { if (!callsign) subscribe(); }, 300);
     };

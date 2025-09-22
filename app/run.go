@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/maniack/miniflightradar/security"
 	"github.com/urfave/cli/v3"
 
 	"github.com/maniack/miniflightradar/backend"
@@ -37,6 +38,9 @@ func Run(ctx context.Context, c *cli.Command) error {
 	shutdownTracer := monitoring.InitTracer(tracingEndpoint, "mini-flightradar")
 	defer shutdownTracer()
 
+	// Initialize auth (loads/persists JWT secret) early so WS path can validate immediately
+	security.InitAuth()
+
 	// Open storage and start ingestor
 	if _, err := storage.Open(retention); err != nil {
 		log.Printf("failed to open storage: %v", err)
@@ -62,6 +66,9 @@ func Run(ctx context.Context, c *cli.Command) error {
 	// to ensure http.Hijacker works during upgrade.
 	r.Get("/ws/flights", backend.FlightsWSHandler)
 
+	// Frontend OTEL proxy endpoint (bypass security middleware). Sends to tracing.endpoint
+	r.HandleFunc("/otel/v1/traces", backend.OTLPTracesProxy(tracingEndpoint))
+
 	// Subrouter for regular HTTP routes with full middleware stack
 	api := chi.NewRouter()
 	// Enable gzip/deflate compression for API and static responses
@@ -79,6 +86,8 @@ func Run(ctx context.Context, c *cli.Command) error {
 			next.ServeHTTP(w, r)
 		})
 	})
+	// Security: CORS + CSRF + JWT (also issues cookies for UI)
+	api.Use(security.SecurityMiddleware)
 	// Tracing before logging to ensure trace IDs are present
 	api.Use(monitoring.TracingMiddleware)
 	// Metrics and structured logging

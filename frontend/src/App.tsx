@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import FlightMap from "./components/FlightMap";
+import { startUISpan } from './otel-ui';
 
 const App: React.FC = () => {
   const [callsign, setCallsign] = useState("");
@@ -108,6 +109,8 @@ const App: React.FC = () => {
     if (e) e.preventDefault();
     if (!canSearch) return;
     const up = callsign.trim().toUpperCase();
+    // APM: Search submit span
+    try { const { end } = startUISpan('ui.search.submit', { query: up }); end(); } catch {}
     setCallsign(up);
     setErrorMsg(null);
     setSubmitted(true);
@@ -171,7 +174,7 @@ const App: React.FC = () => {
           <div className="layer-switch">
             <button
               className={`chip ${baseMode === 'osm' ? 'active' : ''}`}
-              onClick={() => setBaseMode('osm')}
+              onClick={() => { try { const { end } = startUISpan('ui.layer.switch', { to: 'osm' }); end(); } catch {}; setBaseMode('osm'); }}
               title="OpenStreetMap"
             >
               <i className="fa-solid fa-map"></i>
@@ -179,7 +182,7 @@ const App: React.FC = () => {
             </button>
             <button
               className={`chip ${baseMode === 'hyb' ? 'active' : ''}`}
-              onClick={() => setBaseMode('hyb')}
+              onClick={() => { try { const { end } = startUISpan('ui.layer.switch', { to: 'hyb' }); end(); } catch {}; setBaseMode('hyb'); }}
               title="Hybrid (Imagery + Labels)"
             >
               <i className="fa-solid fa-layer-group"></i>
@@ -197,6 +200,7 @@ const App: React.FC = () => {
           locateToken={locateToken}
           onSelectCallsign={(cs) => {
             const up = (cs || '').toString().trim().toUpperCase();
+            try { const { end } = startUISpan('ui.select.flight', { callsign: up || '(clear)' }); end(); } catch {}
             setCallsign(up);
             setErrorMsg(null);
             if (up === '') {
@@ -216,10 +220,10 @@ const App: React.FC = () => {
 
         {/* Bottom-right controls: locate + theme toggle */}
         <div className="br-controls">
-          <button className="fab-btn" onClick={doLocate} title="Center on my location" aria-label="Center on my location">
+          <button className="fab-btn" onClick={() => { try { const { end } = startUISpan('ui.locate'); end(); } catch {}; doLocate(); }} title="Center on my location" aria-label="Center on my location">
             <i className="fa-solid fa-location-crosshairs"></i>
           </button>
-          <button className="fab-btn" onClick={toggleTheme} aria-label="Toggle theme" title="Toggle theme">
+          <button className="fab-btn" onClick={() => { try { const next = theme === 'light' ? 'dark' : 'light'; const { end } = startUISpan('ui.theme.toggle', { from: theme, to: next }); end(); } catch {}; toggleTheme(); }} aria-label="Toggle theme" title="Toggle theme">
             {theme === 'light' ? <i className="fa-solid fa-moon"></i> : <i className="fa-solid fa-sun"></i>}
           </button>
         </div>

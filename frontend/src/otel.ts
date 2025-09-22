@@ -8,8 +8,8 @@ import { Resource } from '@opentelemetry/resources';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { ZoneContextManager } from '@opentelemetry/context-zone';
 
-// Read exporter URL from CRA env var. Example: http://localhost:4318/v1/traces
-const exporterUrl = process.env.REACT_APP_OTEL_EXPORTER_URL;
+// Send web traces to backend proxy endpoint; backend forwards to OTEL collector configured via --tracing.endpoint
+const exporterUrl = '/otel/v1/traces';
 
 const provider = new WebTracerProvider({
   resource: new Resource({
@@ -28,6 +28,13 @@ provider.register({
   contextManager: new ZoneContextManager(),
   // propagator: default W3C tracecontext is fine
 });
+
+// Flush pending spans on page unload to improve delivery
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    try { provider.forceFlush(); } catch (_) { /* noop */ }
+  });
+}
 
 // Note: auto-instrumentations removed to avoid npm ETARGET issues.
 // You can manually create spans around important actions if needed.

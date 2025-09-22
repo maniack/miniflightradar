@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/maniack/miniflightradar/monitoring"
+	"github.com/maniack/miniflightradar/security"
 	"github.com/maniack/miniflightradar/storage"
 )
 
@@ -113,6 +114,18 @@ func upgradeToWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error)
 // FlightsWSHandler streams positions of all flights and recent trails as JSON array messages.
 // Frontend performs filtering and track rendering. Any provided bbox parameter is ignored for simplicity.
 func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
+	// Security check: require valid JWT cookie and CSRF token matching query param
+	if !security.ValidateJWTFromRequest(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	csrfQ := r.URL.Query().Get("csrf")
+	csrfC := security.GetCSRFFromRequest(r)
+	if csrfQ == "" || csrfQ != csrfC {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	ws, err := upgradeToWebSocket(w, r)
 	if err != nil {
 		monitoring.Debugf("ws upgrade error: %v", err)
