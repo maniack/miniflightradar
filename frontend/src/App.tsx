@@ -7,7 +7,7 @@ const App: React.FC = () => {
   const [callsign, setCallsign] = useState("");
   const [searchToken, setSearchToken] = useState(0);
   const [locateToken, setLocateToken] = useState(0);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'flight' | 'geo'; msg: string } | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('theme');
@@ -112,7 +112,7 @@ const App: React.FC = () => {
     // APM: Search submit span
     try { const { end } = startUISpan('ui.search.submit', { query: up }); end(); } catch {}
     setCallsign(up);
-    setErrorMsg(null);
+    setNotice(null);
     setSubmitted(true);
     setSearchToken((x) => x + 1);
     setURLCallsign(up, false);
@@ -135,7 +135,7 @@ const App: React.FC = () => {
                 placeholder="e.g. AAL100"
                 value={callsign}
                 onChange={(e) => {
-                  setErrorMsg(null);
+                  setNotice(null);
                   const up = e.target.value.toUpperCase().trim();
                   setCallsign(up);
                   if (up === '') {
@@ -154,17 +154,17 @@ const App: React.FC = () => {
             </button>
           </form>
         </div>
-        {submitted && errorMsg && (
+        {notice && (notice.kind !== 'flight' || submitted) && (
           <div className="error-panel" role="alert" aria-live="assertive">
             <div className="card" style={{ background: panelColors.bg, color: panelColors.fg, border: `1px solid ${panelColors.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', maxWidth: 520, width: 'min(92%, 520px)', padding: '10px 12px' }}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <i className="fa-solid fa-triangle-exclamation"></i>
-                  <strong>Flight not found</strong>
+                  <strong>{notice.kind === 'geo' ? 'Location unavailable' : 'Flight not found'}</strong>
                 </div>
-                <button onClick={() => setErrorMsg(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
+                <button onClick={() => setNotice(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
               </div>
-              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{errorMsg}</div>
+              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{notice.msg}</div>
             </div>
           </div>
         )}
@@ -202,7 +202,7 @@ const App: React.FC = () => {
             const up = (cs || '').toString().trim().toUpperCase();
             try { const { end } = startUISpan('ui.select.flight', { callsign: up || '(clear)' }); end(); } catch {}
             setCallsign(up);
-            setErrorMsg(null);
+            setNotice(null);
             if (up === '') {
               // Toggle off selection: clear URL query and submitted state
               setSubmitted(false);
@@ -213,8 +213,10 @@ const App: React.FC = () => {
             }
             setSearchToken((x) => x + 1);
           }}
-          onNotFound={(msg) => setErrorMsg(msg)}
-          onFound={() => setErrorMsg(null)}
+          onNotFound={(msg) => setNotice({ kind: 'flight', msg })}
+          onFound={() => setNotice((n) => (n && n.kind !== 'flight' ? n : null))}
+          onGeoError={(msg) => setNotice({ kind: 'geo', msg })}
+          onGeoOk={() => setNotice((n) => (n && n.kind === 'geo' ? null : n))}
         />
 
 

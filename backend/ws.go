@@ -179,6 +179,29 @@ func tokenListContains(headerVal, token string) bool {
 	return false
 }
 
+// hasExtension reports whether Sec-WebSocket-Extensions contains the named
+// extension, ignoring any parameters (e.g., "permessage-deflate; client_max_window_bits").
+func hasExtension(headerVal, name string) bool {
+	if headerVal == "" {
+		return false
+	}
+	name = strings.ToLower(strings.TrimSpace(name))
+	for _, part := range strings.Split(headerVal, ",") {
+		p := strings.ToLower(strings.TrimSpace(part))
+		if p == "" {
+			continue
+		}
+		base := p
+		if i := strings.IndexByte(p, ';'); i >= 0 {
+			base = strings.TrimSpace(p[:i])
+		}
+		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
 func upgradeToWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error) {
 	if !tokenListContains(r.Header.Get("Connection"), "upgrade") || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		return nil, fmt.Errorf("not a websocket upgrade")
@@ -201,13 +224,9 @@ func upgradeToWebSocket(w http.ResponseWriter, r *http.Request) (*wsConn, error)
 	}
 
 	// Write handshake response
+	// Temporarily disable permessage-deflate negotiation until full client decompression is robust
 	extLine := ""
 	negDeflate := false
-	if tokenListContains(r.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
-		// Negotiate permessage-deflate with no context takeover on both sides
-		extLine = "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover\r\n"
-		negDeflate = true
-	}
 	resp := fmt.Sprintf("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n%s\r\n", accept, extLine)
 	if _, err := rw.WriteString(resp); err != nil {
 		_ = conn.Close()
@@ -269,7 +288,6 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 
 	// reader loop: handle ping/pong/close and ACKs
 	ackCh := make(chan ackMsg, 4)
-	viewportCh := make(chan string, 4)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -327,11 +345,7 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 						}
 					case "viewport":
 						bboxStr := strings.TrimSpace(fmt.Sprint(any["bbox"]))
-						monitoring.Debugf("ws flights <= viewport bbox=%s", bboxStr)
-						select {
-						case viewportCh <- bboxStr:
-						default:
-						}
+						monitoring.Debugf("ws flights <= viewport (ignored) bbox=%s", bboxStr)
 					default:
 						monitoring.Debugf("ws flights <= text type=%s len=%d", typ, len(payload))
 					}
@@ -343,10 +357,6 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}()
-
-	// viewport state for this connection
-	var hasBbox bool
-	var bbox [4]float64
 
 	// helpers to take current snapshot and build diff against previous
 	makeCur := func() (map[string]item, []item, error) {
@@ -368,26 +378,6 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 			curMap[key] = it
 			arr = append(arr, it)
 		}
-		// Apply bbox filter if set
-		if hasBbox {
-			fmap := make(map[string]item, len(curMap))
-			farr := make([]item, 0, len(arr))
-			for _, it := range arr {
-				if it.Lon >= bbox[0] && it.Lon <= bbox[2] && it.Lat >= bbox[1] && it.Lat <= bbox[3] {
-					key := it.Icao24
-					if key == "" {
-						key = strings.TrimSpace(strings.ToUpper(it.Callsign))
-					}
-					if key == "" {
-						continue
-					}
-					fmap[key] = it
-					farr = append(farr, it)
-				}
-			}
-			curMap = fmap
-			arr = farr
-		}
 		return curMap, arr, nil
 	}
 	changed := func(a, b item) bool {
@@ -401,7 +391,7 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 	var seq int64
 	inflight := false
 	bufferHigh := false
-	pending := false // wait for viewport before sending initial snapshot
+	pending := true // send initial snapshot immediately (no server-side bbox)
 	lastSend := time.Now()
 
 	// subscribe to updates
@@ -414,7 +404,7 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 
 	// attempt sending if conditions permit
 	trySend := func() error {
-		if inflight || bufferHigh || !pending || !hasBbox {
+		if inflight || bufferHigh || !pending {
 			return nil
 		}
 		cur, arr, err := makeCur()
@@ -478,29 +468,6 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-			}
-		case s := <-viewportCh:
-			// parse and apply viewport bbox
-			parts := strings.Split(strings.TrimSpace(s), ",")
-			if len(parts) == 4 {
-				minX, e1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-				minY, e2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-				maxX, e3 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
-				maxY, e4 := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-				if e1 == nil && e2 == nil && e3 == nil && e4 == nil && maxX > minX && maxY > minY {
-					bbox = [4]float64{minX, minY, maxX, maxY}
-					hasBbox = true
-					// mark pending to send fresh snapshot for new viewport
-					pending = true
-					monitoring.Debugf("ws flights viewport set minX=%.4f minY=%.4f maxX=%.4f maxY=%.4f", minX, minY, maxX, maxY)
-					if err := trySend(); err != nil {
-						return
-					}
-				} else {
-					monitoring.Debugf("ws flights viewport invalid s=%q", s)
-				}
-			} else {
-				monitoring.Debugf("ws flights viewport malformed s=%q", s)
 			}
 		case <-updates:
 			pending = true

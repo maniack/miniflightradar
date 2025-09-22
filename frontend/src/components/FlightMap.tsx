@@ -74,9 +74,11 @@ interface FlightMapProps {
   onSelectCallsign?: (callsign: string) => void;
   onNotFound?: (message: string) => void;
   onFound?: () => void;
+  onGeoError?: (message: string) => void;
+  onGeoOk?: () => void;
 }
 
-const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign, onNotFound, onFound }) => {
+const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign, onNotFound, onFound, onGeoError, onGeoOk }) => {
   const mapRef = useRef<OlMap | null>(null);
   const vectorSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   // Source/layer for tracked flight + its track (on top)
@@ -109,24 +111,69 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   const animFromRef = useRef<[number, number] | null>(null);
   const animToRef = useRef<[number, number] | null>(null);
 
+  // Queue for centering if map is not yet initialized
+  const pendingCenterRef = useRef<{ lon: number; lat: number; zoom: number } | null>(null);
+
   const centerTo = (lon: number, lat: number, zoom = 8) => {
-    if (!mapRef.current) return;
-    const v = mapRef.current.getView();
+    const map = mapRef.current;
+    if (!map) {
+      // Map not ready yet — remember request and apply on init
+      pendingCenterRef.current = { lon, lat, zoom };
+      return;
+    }
+    const v = map.getView();
     v.animate({ center: fromLonLat([lon, lat]), zoom, duration: 400 });
   };
 
   const geolocate = () => {
-    if (!("geolocation" in navigator)) return;
+    if (!("geolocation" in navigator)) { onGeoError && onGeoError('Location services are not available in your browser.'); return; }
     try {
+      let done = false;
+      let watchId: number | null = null;
+      const finish = (lon: number, lat: number) => {
+        if (done) return;
+        done = true;
+        if (watchId !== null) {
+          try { navigator.geolocation.clearWatch(watchId); } catch {}
+        }
+        const curZ = mapRef.current?.getView().getZoom() || 8;
+        centerTo(lon, lat, Math.max(8, curZ));
+        try { onGeoOk && onGeoOk(); } catch {}
+      };
+      const onGeoFail = (code?: number) => {
+        let msg = 'Unable to determine your location. Please allow access to location services and try again.';
+        if (code === 1) msg = 'Location permission denied. Please allow access to location services for this site.';
+        if (code === 2) msg = 'Location unavailable. Please check GPS/location services and try again.';
+        if (code === 3) msg = 'Location request timed out. Please try again.';
+        try { onGeoError && onGeoError(msg); } catch {}
+      };
+      // Prefer watchPosition for quicker cached fixes, clear after first value
+      try {
+        watchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            const { latitude, longitude } = pos.coords;
+            finish(longitude, latitude);
+          },
+          (err) => { onGeoFail(err && (err as any).code); },
+          { enableHighAccuracy: true, timeout: 15000, maximumAge: 300000 }
+        ) as unknown as number;
+      } catch {}
+      // Fallback: also request a one-shot current position with a modest timeout
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const { latitude, longitude } = pos.coords;
-          centerTo(longitude, latitude, Math.max(8, mapRef.current?.getView().getZoom() || 8));
+          finish(longitude, latitude);
         },
-        // Ignore errors silently (user may deny permission)
-        () => {},
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 60000 }
+        (err) => { onGeoFail(err && (err as any).code); },
+        { enableHighAccuracy: true, timeout: 12000, maximumAge: 300000 }
       );
+      // Safety timer: stop watching after 15s if nothing arrived
+      window.setTimeout(() => {
+        if (!done && watchId !== null) {
+          try { navigator.geolocation.clearWatch(watchId); } catch {}
+          onGeoFail(3);
+        }
+      }, 16000);
     } catch (_) {
       // noop
     }
@@ -202,11 +249,26 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
 
     mapRef.current = map;
 
-    // On first load, center on user's location only if no callsign is present in the URL
+    // Apply any pending center request queued before map was ready
+    if (pendingCenterRef.current) {
+      const { lon, lat, zoom } = pendingCenterRef.current;
+      pendingCenterRef.current = null;
+      // Use a small timeout to ensure view is fully attached
+      setTimeout(() => centerTo(lon, lat, zoom), 0);
+    }
+
+    // On first load, restore last viewport if available; otherwise center on user's location when no callsign is present
     try {
       const u = new URL(window.location.href);
       const q = (u.searchParams.get('q') || u.searchParams.get('callsign') || '').trim();
-      if (!q) {
+      const saved = (() => {
+        try { const raw = localStorage.getItem('mfr_view_v1'); return raw ? JSON.parse(raw) : null; } catch { return null; }
+      })();
+      if (!q && saved && typeof saved.lon === 'number' && typeof saved.lat === 'number' && typeof saved.zoom === 'number') {
+        const v = map.getView();
+        v.setCenter(fromLonLat([saved.lon, saved.lat]));
+        v.setZoom(saved.zoom);
+      } else if (!q) {
         geolocate();
       }
     } catch (_) {
@@ -917,7 +979,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         processPoints(pts);
         await saveSnapshotNow(pts);
       } catch (e) {
-        console.debug('[FlightMap] bbox error', e);
+        // silently ignore fetch errors
       }
     };
 
@@ -1020,6 +1082,10 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
           zoom: typeof zoom === 'number' ? zoom : undefined,
           bbox: bbox ? `${bbox[0].toFixed(4)},${bbox[1].toFixed(4)},${bbox[2].toFixed(4)},${bbox[3].toFixed(4)}` : undefined,
         });
+        // Persist last viewport for next launch as a fallback when geolocation is unavailable
+        if (typeof lon === 'number' && typeof lat === 'number' && typeof zoom === 'number') {
+          try { localStorage.setItem('mfr_view_v1', JSON.stringify({ lon, lat, zoom, ts: Date.now() })); } catch {}
+        }
         end();
       } catch {}
       if (resubTimer) window.clearTimeout(resubTimer);
