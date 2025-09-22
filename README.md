@@ -1,152 +1,152 @@
 # Mini Flightradar PWA
 
-Простой демонстрационный сервис для отслеживания рейсов через OpenSky API: backend на Go + PWA‑фронтенд (React), метрики Prometheus и трассировка OpenTelemetry. Документация обновлена согласно текущему коду.
+A small demo service to track flights via the OpenSky API: Go backend + PWA frontend (React), Prometheus metrics, and OpenTelemetry tracing. This README reflects the current codebase and routes.
 
-## Требования
+## Requirements
 
 - Go 1.24+
 - Node.js 20+
-- Docker (опционально)
+- Docker (optional)
 
-## Быстрый старт (Go)
+## Quick start (Go)
 
-Рекомендуется собирать через Makefile (включая фронтенд) и запускать бинарник:
+Recommended: build via Makefile (includes frontend) and run the binary:
 
 ```bash
 make all
 ./bin/mini-flightradar --listen ":8080"
 ```
 
-Альтернатива (по шагам):
+Alternative (step-by-step):
 
 ```bash
-# 1) собрать фронтенд и скопировать его в ui/build (для встраивания в бинарник)
+# 1) build the frontend and copy it to ui/build (embedded into the binary)
 make frontend
-# 2) собрать бэкенд (включая встраивание статики из ui/build)
+# 2) build the backend (embeds static files from ui/build)
 make backend
-# 3) запустить
+# 3) run
 ./bin/mini-flightradar --listen ":8080"
 ```
 
-После запуска UI доступен на http://localhost:8080
+Once started, the UI is available at http://localhost:8080
 
-## Сборка через Makefile
+## Build with Makefile
 
 ```bash
-make all              # соберёт frontend и backend, положит бинарник в bin/
+make all              # builds frontend and backend, puts the binary into bin/
 ./bin/mini-flightradar --listen ":8080"
 ```
 
-Полезные цели:
-- make frontend — сборка фронтенда (React) и копирование в ui/build
-- make backend  — сборка Go‑бинарника (использует vendoring)
-- make docker   — сборка Docker‑образа
-- make clean    — очистка артефактов (bin/, ui/build)
+Useful targets:
+- make frontend — build the React frontend and copy to ui/build
+- make backend  — build the Go binary (uses vendoring)
+- make docker   — build a Docker image
+- make clean    — remove artifacts (bin/, ui/build)
 
-## Сборка и запуск через Docker
+## Docker build and run
 
 ```bash
 docker build -t miniflightradar .
 docker run --rm -p 8080:8080 -v $(pwd)/data:/app/data --name minifr miniflightradar
 ```
 
-Контейнер слушает на 8080. Статика фронтенда встроена в бинарник; в итоговый образ копируется только исполняемый файл. Для сохранения БД и секретов пробросьте том в /app/data (как в примере выше).
+The container listens on 8080. The frontend static assets are embedded into the Go binary; the final image copies only the executable. Mount a volume at /app/data to persist the DB and secrets across restarts (as in the example above).
 
-## Конфигурация: флаги и переменные окружения
+## Configuration: flags and environment variables
 
-Флаги CLI (алиасы в скобках):
-- server.listen (--listen, -l) — адрес HTTP‑сервера, по умолчанию `:8080`.
-- server.proxy  (--proxy,  -x) — прокси URL для исходящих запросов (http/https/socks5). Пример: `--proxy socks5://127.0.0.1:1080`.
-- tracing.endpoint (--tracing, -t) — адрес OTEL‑коллектора для трейсинга (формат `host:port` или полный URL), например `otel-collector:4318`.
-- storage.path (--db) — путь к файлу BuntDB, по умолчанию `./data/flight.buntdb`.
-- opensky.interval (--interval, -i) — интервал опроса OpenSky, по умолчанию `60s`.
-- opensky.retention (--retention, -r) — срок хранения истории, по умолчанию `168h` (1 неделя).
-- opensky.user — имя пользователя OpenSky (опционально, для Basic Auth).
-- opensky.pass — пароль OpenSky (опционально, для Basic Auth).
-- debug (-d) — включить подробное логирование.
+CLI flags (aliases in parentheses):
+- server.listen (--listen, -l) — HTTP server address, default `:8080`.
+- server.proxy  (--proxy,  -x) — proxy URL for outbound requests (http/https/socks5). Example: `--proxy socks5://127.0.0.1:1080`.
+- tracing.endpoint (--tracing, -t) — OpenTelemetry collector endpoint for traces (either `host:port` or full URL), e.g. `otel-collector:4318`.
+- storage.path (--db) — path to BuntDB file, default `./data/flight.buntdb`.
+- opensky.interval (--interval, -i) — OpenSky polling interval, default `60s`.
+- opensky.retention (--retention, -r) — history retention, default `168h` (1 week).
+- opensky.user — OpenSky username (optional, for Basic Auth).
+- opensky.pass — OpenSky password (optional, for Basic Auth).
+- debug (-d) — enable verbose logging.
 
-Прокси можно задавать и стандартными переменными окружения (Linux‑style):
+You can also configure proxies via standard Linux-style environment variables:
 - HTTP_PROXY / http_proxy
 - HTTPS_PROXY / https_proxy
 - ALL_PROXY / all_proxy
 - NO_PROXY / no_proxy
 
-Также предусмотрены скрытые флаги для управления секретом JWT:
-- security.jwt.secret — явный секрет (HS256) для подписи cookies.
-- security.jwt.file — путь к файлу секрета (по умолчанию `./data/jwt.secret`). Если секрет не задан флагом, он будет загружен из файла или сгенерирован и сохранён на диск.
+Hidden flags for JWT secret management:
+- security.jwt.secret — explicit secret (HS256) to sign cookies.
+- security.jwt.file — path to secret file (default `./data/jwt.secret`). If `security.jwt.secret` is empty, the secret is loaded from the file or generated and saved on disk.
 
-## HTTP/WS‑эндпоинты
+## HTTP and WebSocket endpoints
 
-- GET /api/flight?callsign=ABC123 — последняя точка для рейса (массив из одной записи в OpenSky‑совместимой форме `states`).
-- GET /api/flights?bbox=minLon,minLat,maxLon,maxLat — текущие точки в прямоугольнике (массив объектов с полями `icao24,callsign,lon,lat,alt,track,speed,ts`).
-- GET /api/flights — все текущие точки (тот же формат, что и выше), используется UI для обзора.
-- GET /api/track?callsign=ABC123 — текущий отрезок трека для рейса (JSON: `{callsign, icao24, points: [...]}`).
-- GET /metrics — метрики Prometheus.
-- WS /ws/flights — поток обновлений позиций (диффы) для всех текущих рейсов. Требуются cookies и CSRF (см. раздел Security). Клиент должен передать `?csrf=<значение cookie mfr_csrf>` и отправлять ACK `{"type":"ack","seq":N,"buffered":bytes}`. Поле `trail` (опционально) содержит короткий хвост трека (последние ~24 точки за ~45 минут) для каждого самолёта в upsert.
-  - Сервер периодически отправляет heartbeat‑сообщения `{type:"hb", ts:<unix>}` для поддержания соединения.
-  - При штатном завершении работы сервер отправляет всем WS‑клиентам уведомление `{type:"server_shutdown", ts:<unix>}`.
-- GET /healthz — простой health‑эндпоинт без аутентификации (200 OK + JSON). Предназначен для внешних liveness‑проверок и операторских сценариев; фронтенд для отслеживания доступности использует существующий WebSocket (onopen/onclose + hb).
-- POST /otel/v1/traces — прокси OTLP/HTTP для фронтенда; сервер пересылает запросы в коллектор, указанный в `--tracing.endpoint`. 
+Currently exposed endpoints (as wired in app/run.go):
+- GET /api/flights — all current flight positions (array of objects with fields `icao24,callsign,lon,lat,alt,track,speed,ts`). Used by the UI as a fallback.
+- WS /ws/flights — live stream of position diffs for all current flights. Requires cookies and CSRF (see Security). The client must pass `?csrf=<value of mfr_csrf cookie>` and send ACK frames of the form `{"type":"ack","seq":N,"buffered":bytes}`. Each upsert item may include a short `trail` (last ~24 points over ~45 minutes).
+  - The server periodically sends heartbeat messages `{"type":"hb","ts":<unix>}` to keep the connection alive.
+  - On graceful shutdown the server notifies all WS clients `{"type":"server_shutdown","ts":<unix>}`.
+- GET /metrics — Prometheus metrics.
+- GET /healthz — simple unauthenticated health endpoint (200 OK + JSON). Intended for external liveness checks; the frontend relies on the WebSocket (onopen/onclose + heartbeats) for availability.
+- POST /otel/v1/traces — OTLP/HTTP proxy for the frontend; the server forwards to the collector specified via `--tracing.endpoint`.
 
-## Наблюдаемость
+Note: Handlers exist in code for additional routes like `/api/flight?callsign=...`, `/api/flights?bbox=...`, and `/api/track?callsign=...`, but these are not currently mounted in the router. Only `/api/flights` is exposed via HTTP in the current wiring.
 
-- Prometheus: /metrics, счётчики/гистограммы для HTTP и полётных запросов.
-- OpenTelemetry: сервер создаёт спаны для HTTP; в ответ добавляется заголовок `X-Trace-Id` для корреляции. Веб‑клиент отправляет трейсинг на `/otel/v1/traces` (см. выше).
-- Логи: унифицированные строки с полями method, path, status, duration, remote, ua, trace_id, span_id, request_id.
-- Кеширование: глобальный middleware добавляет сильные ETag для GET/HEAD и корректно обслуживает `If-None-Match`.
-- Request ID: для каждого запроса добавляется и логируется `X-Request-ID`.
+## Observability
+
+- Prometheus: `/metrics` with counters/histograms for HTTP and flight operations.
+- OpenTelemetry: server creates spans for HTTP; responses include `X-Trace-Id` for correlation. The web client can send traces to `/otel/v1/traces` (see above).
+- Logs: structured single-line logs with fields method, path, status, duration, remote, ua, trace_id, span_id, request_id.
+- Caching: a global middleware adds strong ETags for GET/HEAD and honors `If-None-Match`.
+- Request ID: each request includes and logs an `X-Request-ID`.
 
 ## Security
 
-- Cookies: при первом обращении сервер выпускает две cookies — `mfr_jwt` (JWT HS256 с сроком ~30 дней, HttpOnly, SameSite=Lax) и `mfr_csrf` (токен для CSRF, доступен из JS).
-- Защита API: для маршрутов `/api/*` (кроме `/metrics`) требуется совпадение заголовка `X-CSRF-Token` со значением cookie `mfr_csrf` и валидный `mfr_jwt`.
-- WebSocket `/ws/flights`: проверяет валидность `mfr_jwt` и токен CSRF из query‑параметра `csrf`.
-- Секрет JWT: задаётся флагом `security.jwt.secret` либо хранится/генерируется в файле `security.jwt.file` (по умолчанию `./data/jwt.secret`).
+- Cookies: on first visit the server issues two cookies — `mfr_jwt` (JWT HS256, ~30 days, HttpOnly, SameSite=Lax) and `mfr_csrf` (CSRF token, readable by JS).
+- API protection: for `/api/*` routes (except `/metrics`) the server requires header `X-CSRF-Token` to match the `mfr_csrf` cookie and a valid `mfr_jwt`.
+- WebSocket `/ws/flights`: requires a valid `mfr_jwt` and the CSRF token passed as the `csrf` query parameter.
+- JWT secret: set via `security.jwt.secret` or stored/generated in the file at `security.jwt.file` (default `./data/jwt.secret`).
 
-## Данные и персистентность
+## Data and persistence
 
-- Хранилище — BuntDB (ключ/значение). Файл по умолчанию: `./data/flight.buntdb`.
-- Очистка старых точек — автоматически по TTL (флаг `--opensky.retention`, по умолчанию 1 неделя).
-- Рекомендуется монтировать том с каталогом `data/` в Docker для сохранения состояния между перезапусками.
+- Storage — BuntDB (key/value). Default file: `./data/flight.buntdb`.
+- Old points are purged automatically via TTL (flag `--opensky.retention`, default 1 week).
+- For Docker, mount the `data/` directory to persist state between restarts.
 
-## OpenSky: частота опроса и бэкофф
+## OpenSky: polling and backoff
 
-- Базовый интервал опроса задаётся флагом `--opensky.interval` (по умолчанию 60s).
-- При ответах 429/503 применяется бэкофф: следующий запрос откладывается согласно `Retry-After` либо не меньше базового интервала. Текущие точки «продлеваются», чтобы метки не пропадали во время бэкоффа.
-- При указании `opensky.user`/`opensky.pass` используется Basic Auth (лимиты могут отличаться).
+- Base polling interval is controlled by `--opensky.interval` (default 60s).
+- On 429/503 responses the ingestor applies backoff: the next request is delayed per `Retry-After` or at least the base interval. Current points are prolonged so markers don’t disappear during backoff.
+- When `opensky.user`/`opensky.pass` are provided, Basic Auth is used (limits may differ).
 
 ## UI/UX
 
-- Сверху — поле поиска (позывной) и кнопка Search. При активном фильтре показывается только выбранный рейс и его трек.
-- Слева снизу — переключатель слоя карты: OSM (следует теме light/dark) и Hybrid (спутник + подписи).
-- Без фильтра UI показывает все доступные рейсы в текущем окне карты; данные поступают через WebSocket‑диффы.
-- Иконки поставляются локально (@fortawesome/fontawesome-free), внешние CDN не используются. Адаптивная верстка на Flexbox.
+- Top bar: search by callsign and Search button. When a filter is active, only the selected flight and its track are shown.
+- Bottom-left: map layer toggle — OSM (follows light/dark theme) and Hybrid (satellite + labels).
+- Without a filter, the UI shows all available flights in the current viewport; data arrives via WebSocket diffs.
+- Icons are bundled locally (`@fortawesome/fontawesome-free`); no external CDNs are used. Responsive layout via Flexbox.
 
-## Разработка
+## Development
 
-- Фронтенд: `cd frontend && npm start`
-- Бэкенд: `go run ./cmd/miniflightradar --listen :8080`
+- Frontend: `cd frontend && npm start`
+- Backend: `go run ./cmd/miniflightradar --listen :8080`
 
-UI обращается к API/WS на том же хосте/порту.
+The UI talks to API/WS on the same host/port.
 
-### Проверки качества и CI
+### Quality checks and CI
 
-- Локально:
-  - Линтеры: `golangci-lint run` (или `make lint`) — требуется установленный golangci-lint.
-  - Статический анализ: `go vet ./...` (или `make vet`).
-  - Тесты (если будут добавлены): `go test ./...` (или `make test`).
-- CI: в репозитории есть GitHub Actions workflow `.github/workflows/go.yml`, который запускает `go build`, `go vet` и `golangci-lint` на каждом push/PR (ветки main/master). Используется vendoring (`GOFLAGS=-mod=vendor`).
+- Locally:
+  - Linters: `golangci-lint run` (or `make lint`) — requires golangci-lint installed.
+  - Static analysis: `go vet ./...` (or `make vet`).
+  - Tests (if any are added): `go test ./...` (or `make test`).
+- CI: a GitHub Actions workflow `.github/workflows/go.yml` runs `go build`, `go vet` and `golangci-lint` on each push/PR (main/master branches). Vendoring is used (`GOFLAGS=-mod=vendor`).
 
-## Траблшутинг
+## Troubleshooting
 
-- Если не видите статику, соберите фронтенд: `make frontend` (в результате появится `ui/build`).
-- Для быстрой проверки бэкенда можно собрать только его: `make backend` (предварительно соберите UI, если хотите встраивание).
-- В Docker пробросьте том `-v $(pwd)/data:/app/data`, чтобы база и секреты не терялись.
+- If static assets are missing, build the frontend: `make frontend` (this produces `ui/build`).
+- To quickly test the backend only, you can run `make backend` (build the UI first if you want the assets embedded).
+- In Docker, mount `-v $(pwd)/data:/app/data` so the DB and secrets are preserved.
 
 ## Security and dependency hygiene
 
-- Frontend dependencies are pinned and production builds use `npm ci`; UI встраивается в Go‑бинарник, Node‑инструменты не входят в образ.
-- Current audit status: no critical/high production vulnerabilities; dev‑сервер CRA может иметь moderate‑адвайзори, относящиеся только к локальной разработке.
+- Frontend dependencies are pinned and production builds use `npm ci`; the UI is embedded into the Go binary, and Node tooling is not present in the final image.
+- Current audit status: no critical/high production vulnerabilities; the CRA dev server may have moderate advisories relevant only to local development.
 - Run an audit locally: `cd frontend && npm audit --omit=dev`.
 
 ## License
