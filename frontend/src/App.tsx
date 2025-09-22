@@ -2,12 +2,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import FlightMap from "./components/FlightMap";
 import { startUISpan } from './otel-ui';
+import SearchBar from './components/ui/SearchBar';
+import NoticeCard from './components/ui/NoticeCard';
 
 const App: React.FC = () => {
   const [callsign, setCallsign] = useState("");
   const [searchToken, setSearchToken] = useState(0);
   const [locateToken, setLocateToken] = useState(0);
-  const [notice, setNotice] = useState<{ kind: 'flight' | 'geo'; msg: string } | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'flight' | 'geo' | 'backend-offline' | 'backend-shutdown' | 'backend-online'; msg: string } | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     const stored = localStorage.getItem('theme');
@@ -126,46 +128,37 @@ const App: React.FC = () => {
       <div className="map-wrap">
         {/* Top controls: search form only */}
         <div className="controls">
-          <form onSubmit={onSubmit} style={{display:'flex',alignItems:'center',gap:8}}>
-            <div className="field">
-              <span className="label">Flight #</span>
-              <input
-                className="input"
-                type="text"
-                placeholder="e.g. AAL100"
-                value={callsign}
-                onChange={(e) => {
-                  setNotice(null);
-                  const up = e.target.value.toUpperCase().trim();
-                  setCallsign(up);
-                  if (up === '') {
-                    // Clear selection and URL when input emptied
-                    setSubmitted(false);
-                    setURLCallsign(null, false);
-                  } else {
-                    setSubmitted(false);
-                  }
-                }}
-              />
-            </div>
-            <button className="button search-btn" type="submit" disabled={!canSearch} aria-label="Search">
-              <i className="fa-solid fa-magnifying-glass"></i>
-              <span className="btn-text">Search</span>
-            </button>
-          </form>
+          <SearchBar
+            value={callsign}
+            canSearch={canSearch}
+            onChange={(raw) => {
+              setNotice(null);
+              const up = raw.toUpperCase().trim();
+              setCallsign(up);
+              if (up === '') {
+                // Clear selection and URL when input emptied
+                setSubmitted(false);
+                setURLCallsign(null, false);
+              } else {
+                setSubmitted(false);
+              }
+            }}
+            onSubmit={() => onSubmit()}
+          />
         </div>
         {notice && (notice.kind !== 'flight' || submitted) && (
           <div className="error-panel" role="alert" aria-live="assertive">
-            <div className="card" style={{ background: panelColors.bg, color: panelColors.fg, border: `1px solid ${panelColors.border}`, borderRadius: 8, boxShadow: '0 8px 24px rgba(0,0,0,0.35)', maxWidth: 520, width: 'min(92%, 520px)', padding: '10px 12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <i className="fa-solid fa-triangle-exclamation"></i>
-                  <strong>{notice.kind === 'geo' ? 'Location unavailable' : 'Flight not found'}</strong>
-                </div>
-                <button onClick={() => setNotice(null)} aria-label="Close" title="Close" style={{ background: 'transparent', border: 'none', color: panelColors.fg, fontSize: 18, lineHeight: 1, cursor: 'pointer' }}>×</button>
-              </div>
-              <div style={{ fontSize: 14, lineHeight: 1.45 }}>{notice.msg}</div>
-            </div>
+            <NoticeCard
+              content={{
+                title: notice.kind === 'geo' ? 'Location unavailable' :
+                       notice.kind === 'backend-offline' ? 'Backend unavailable' :
+                       notice.kind === 'backend-shutdown' ? 'Server is shutting down' :
+                       notice.kind === 'backend-online' ? 'Server is back online' : 'Flight not found',
+                msg: notice.msg,
+              }}
+              onClose={() => setNotice(null)}
+              colors={panelColors}
+            />
           </div>
         )}
 
@@ -217,6 +210,12 @@ const App: React.FC = () => {
           onFound={() => setNotice((n) => (n && n.kind !== 'flight' ? n : null))}
           onGeoError={(msg) => setNotice({ kind: 'geo', msg })}
           onGeoOk={() => setNotice((n) => (n && n.kind === 'geo' ? null : n))}
+          onBackendOffline={(msg) => setNotice({ kind: 'backend-offline', msg })}
+          onBackendShuttingDown={(msg) => setNotice({ kind: 'backend-shutdown', msg })}
+          onBackendOnline={() => {
+            setNotice({ kind: 'backend-online', msg: 'Server is back online' });
+            window.setTimeout(() => setNotice((n) => (n && n.kind === 'backend-online' ? null : n)), 3000);
+          }}
         />
 
 

@@ -69,6 +69,8 @@ func Run(ctx context.Context, c *cli.Command) error {
 	// WebSocket endpoint on the root router without extra wrapping middlewares
 	// to ensure http.Hijacker works during upgrade.
 	r.Get("/ws/flights", backend.FlightsWSHandler)
+	// Health endpoint for heartbeat checks (no auth)
+	r.Get("/healthz", backend.HealthHandler)
 
 	// Frontend OTEL proxy endpoint (bypass security middleware). Sends to tracing.endpoint
 	r.HandleFunc("/otel/v1/traces", backend.OTLPTracesProxy(tracingEndpoint))
@@ -129,7 +131,10 @@ func Run(ctx context.Context, c *cli.Command) error {
 
 	select {
 	case <-ctx.Done():
-		log.Printf("Shutdown signal received, shutting down...")
+		log.Printf("Shutdown signal received, notifying clients and shutting down...")
+		// Notify WS clients about shutdown and give a short time to flush
+		backend.BroadcastShutdown()
+		time.Sleep(300 * time.Millisecond)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)

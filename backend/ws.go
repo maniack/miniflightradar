@@ -14,11 +14,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/maniack/miniflightradar/monitoring"
 	"github.com/maniack/miniflightradar/security"
 	"github.com/maniack/miniflightradar/storage"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // minimal websocket writer (server-to-client only)
@@ -28,11 +31,14 @@ type wsConn struct {
 	c       net.Conn
 	buf     *bufio.ReadWriter
 	deflate bool
+	mu      sync.Mutex
 }
 
 func (w *wsConn) Close() error { return w.c.Close() }
 
 func (w *wsConn) WriteText(b []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	// Optionally compress payload with permessage-deflate if negotiated
 	payload := b
 	first := byte(0x81)            // FIN=1, RSV1=0, opcode=1 (text)
@@ -70,6 +76,8 @@ func (w *wsConn) WriteText(b []byte) error {
 }
 
 func (w *wsConn) WritePing() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	// small ping payload
 	p := []byte("p")
 	h := []byte{0x89, byte(len(p))}
@@ -83,6 +91,8 @@ func (w *wsConn) WritePing() error {
 }
 
 func (w *wsConn) WritePong(p []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if p == nil {
 		p = []byte{}
 	}
@@ -260,19 +270,58 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 		monitoring.Debugf("ws upgrade error: %v", err)
 		return
 	}
-	defer ws.Close()
+	registerWS(ws)
+	defer func() {
+		unregisterWS(ws)
+		_ = ws.Close()
+	}()
 	monitoring.Debugf("ws flights connected remote=%s deflate=%t", r.RemoteAddr, ws.deflate)
 
+	// Telemetry: track latest viewport bbox reported by the client (if any)
+	baseCtx := r.Context()
+	tracer := otel.Tracer("backend/ws")
+	var bboxMu sync.RWMutex
+	var lastBBox string
+	var bboxVals [4]float64 // minLon, minLat, maxLon, maxLat
+	var hasBBox bool
+
+	parseBBox := func(s string) (float64, float64, float64, float64, bool) {
+		parts := strings.Split(s, ",")
+		if len(parts) != 4 {
+			return 0, 0, 0, 0, false
+		}
+		minLon, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+		minLat, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+		maxLon, err3 := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+		maxLat, err4 := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+			return 0, 0, 0, 0, false
+		}
+		if minLon < -180 || maxLon > 180 || minLat < -90 || maxLat > 90 {
+			return 0, 0, 0, 0, false
+		}
+		if maxLon <= minLon || maxLat <= minLat {
+			return 0, 0, 0, 0, false
+		}
+		return minLon, minLat, maxLon, maxLat, true
+	}
+
 	// message formats
+	type trailPoint struct {
+		Lon float64 `json:"lon"`
+		Lat float64 `json:"lat"`
+		// TS omitted to keep payload small; add if needed later
+	}
 	type item struct {
-		Icao24   string  `json:"icao24"`
-		Callsign string  `json:"callsign"`
-		Lon      float64 `json:"lon"`
-		Lat      float64 `json:"lat"`
-		Alt      float64 `json:"alt,omitempty"`
-		Track    float64 `json:"track,omitempty"`
-		Speed    float64 `json:"speed,omitempty"`
-		TS       int64   `json:"ts"`
+		Icao24   string       `json:"icao24"`
+		Callsign string       `json:"callsign"`
+		Lon      float64      `json:"lon"`
+		Lat      float64      `json:"lat"`
+		Alt      float64      `json:"alt,omitempty"`
+		Track    float64      `json:"track,omitempty"`
+		Speed    float64      `json:"speed,omitempty"`
+		TS       int64        `json:"ts"`
+		Trail    []trailPoint `json:"trail,omitempty"`
 	}
 	type diffMsg struct {
 		Type   string   `json:"type"`
@@ -345,7 +394,35 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 						}
 					case "viewport":
 						bboxStr := strings.TrimSpace(fmt.Sprint(any["bbox"]))
-						monitoring.Debugf("ws flights <= viewport (ignored) bbox=%s", bboxStr)
+						if bboxStr != "" {
+							minLon, minLat, maxLon, maxLat, ok := parseBBox(bboxStr)
+							if ok {
+								bboxMu.Lock()
+								lastBBox = bboxStr
+								bboxVals = [4]float64{minLon, minLat, maxLon, maxLat}
+								hasBBox = true
+								bboxMu.Unlock()
+								// Telemetry span for viewport updates
+								ctx, sp := tracer.Start(baseCtx, "ws.viewport")
+								_ = ctx
+								sp.SetAttributes(
+									attribute.String("viewport.bbox", bboxStr),
+									attribute.Float64("viewport.min_lon", minLon),
+									attribute.Float64("viewport.min_lat", minLat),
+									attribute.Float64("viewport.max_lon", maxLon),
+									attribute.Float64("viewport.max_lat", maxLat),
+									attribute.Float64("viewport.width_deg", maxLon-minLon),
+									attribute.Float64("viewport.height_deg", maxLat-minLat),
+									attribute.Float64("viewport.area_deg2", (maxLon-minLon)*(maxLat-minLat)),
+								)
+								sp.End()
+								monitoring.Debugf("ws flights <= viewport bbox=%s", bboxStr)
+							} else {
+								monitoring.Debugf("ws flights <= viewport invalid bbox=%s", bboxStr)
+							}
+						} else {
+							monitoring.Debugf("ws flights <= viewport missing bbox")
+						}
 					default:
 						monitoring.Debugf("ws flights <= text type=%s len=%d", typ, len(payload))
 					}
@@ -394,6 +471,10 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 	pending := true // send initial snapshot immediately (no server-side bbox)
 	lastSend := time.Now()
 
+	// trail limits
+	trailLimit := 24
+	trailWindow := 45 * time.Minute
+
 	// subscribe to updates
 	updates, unsubscribe := UpdatesSubscribe()
 	defer unsubscribe()
@@ -407,8 +488,12 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 		if inflight || bufferHigh || !pending {
 			return nil
 		}
+		// Start a span for this diff send
+		_, sp := tracer.Start(baseCtx, "ws.diff.send")
+		defer sp.End()
 		cur, arr, err := makeCur()
 		if err != nil {
+			sp.SetAttributes(attribute.String("error", err.Error()))
 			return err
 		}
 		// build diff
@@ -431,19 +516,85 @@ func FlightsWSHandler(w http.ResponseWriter, r *http.Request) {
 		if len(up) == 0 && len(dl) == 0 {
 			pending = false
 			last = cur
+			sp.SetAttributes(
+				attribute.Int("diff.up_count", 0),
+				attribute.Int("diff.del_count", 0),
+			)
 			return nil
+		}
+		// Attach short trails for upserted flights to restore UX while keeping payload small.
+		trailTotal := 0
+		for i := range up {
+			icao := strings.TrimSpace(up[i].Icao24)
+			if icao == "" {
+				continue
+			}
+			pts, err := storage.Get().RecentTrackByICAO(icao, trailLimit, trailWindow)
+			if err != nil || len(pts) == 0 {
+				continue
+			}
+			tr := make([]trailPoint, 0, len(pts))
+			for _, tp := range pts {
+				tr = append(tr, trailPoint{Lon: tp.Lon, Lat: tp.Lat})
+			}
+			up[i].Trail = tr
+			trailTotal += len(tr)
 		}
 		seq++
 		msg := diffMsg{Type: "diff", Seq: seq, Upsert: up, Delete: dl}
 		b, _ := json.Marshal(msg)
 		if err := ws.WriteText(b); err != nil {
+			sp.SetAttributes(
+				attribute.Int64("diff.seq", seq),
+				attribute.Int("diff.up_count", len(up)),
+				attribute.Int("diff.del_count", len(dl)),
+				attribute.Int("diff.bytes", len(b)),
+				attribute.Int("diff.trails_total", trailTotal),
+			)
+			// also attach last known viewport if present
+			bboxMu.RLock()
+			if hasBBox {
+				sp.SetAttributes(
+					attribute.String("viewport.bbox", lastBBox),
+					attribute.Float64("viewport.min_lon", bboxVals[0]),
+					attribute.Float64("viewport.min_lat", bboxVals[1]),
+					attribute.Float64("viewport.max_lon", bboxVals[2]),
+					attribute.Float64("viewport.max_lat", bboxVals[3]),
+					attribute.Float64("viewport.width_deg", bboxVals[2]-bboxVals[0]),
+					attribute.Float64("viewport.height_deg", bboxVals[3]-bboxVals[1]),
+					attribute.Float64("viewport.area_deg2", (bboxVals[2]-bboxVals[0])*(bboxVals[3]-bboxVals[1])),
+				)
+			}
+			bboxMu.RUnlock()
 			return err
 		}
 		lastSend = time.Now()
-		monitoring.Debugf("ws flights => diff seq=%d up=%d del=%d bytes=%d", seq, len(up), len(dl), len(b))
+		monitoring.Debugf("ws flights => diff seq=%d up=%d del=%d bytes=%d trails=%d", seq, len(up), len(dl), len(b), trailTotal)
 		inflight = true
 		last = cur
 		pending = false
+		sp.SetAttributes(
+			attribute.Int64("diff.seq", seq),
+			attribute.Int("diff.up_count", len(up)),
+			attribute.Int("diff.del_count", len(dl)),
+			attribute.Int("diff.bytes", len(b)),
+			attribute.Int("diff.trails_total", trailTotal),
+		)
+		// also attach last known viewport if present
+		bboxMu.RLock()
+		if hasBBox {
+			sp.SetAttributes(
+				attribute.String("viewport.bbox", lastBBox),
+				attribute.Float64("viewport.min_lon", bboxVals[0]),
+				attribute.Float64("viewport.min_lat", bboxVals[1]),
+				attribute.Float64("viewport.max_lon", bboxVals[2]),
+				attribute.Float64("viewport.max_lat", bboxVals[3]),
+				attribute.Float64("viewport.width_deg", bboxVals[2]-bboxVals[0]),
+				attribute.Float64("viewport.height_deg", bboxVals[3]-bboxVals[1]),
+				attribute.Float64("viewport.area_deg2", (bboxVals[2]-bboxVals[0])*(bboxVals[3]-bboxVals[1])),
+			)
+		}
+		bboxMu.RUnlock()
 		return nil
 	}
 
@@ -504,7 +655,11 @@ func FlightWSHandler(w http.ResponseWriter, r *http.Request) {
 		monitoring.Debugf("ws upgrade error: %v", err)
 		return
 	}
-	defer ws.Close()
+	registerWS(ws)
+	defer func() {
+		unregisterWS(ws)
+		_ = ws.Close()
+	}()
 	monitoring.Debugf("ws flight connected remote=%s deflate=%t callsign=%s", r.RemoteAddr, ws.deflate, callsign)
 
 	var lastSentTS int64
@@ -557,5 +712,38 @@ func FlightWSHandler(w http.ResponseWriter, r *http.Request) {
 				monitoring.Debugf("ws flight => ping")
 			}
 		}
+	}
+}
+
+// --- WS connection registry and broadcast ---
+var (
+	wsClientsMu sync.RWMutex
+	wsClients   = make(map[*wsConn]struct{})
+)
+
+func registerWS(c *wsConn) {
+	wsClientsMu.Lock()
+	wsClients[c] = struct{}{}
+	wsClientsMu.Unlock()
+}
+
+func unregisterWS(c *wsConn) {
+	wsClientsMu.Lock()
+	delete(wsClients, c)
+	wsClientsMu.Unlock()
+}
+
+// BroadcastShutdown sends a one-off shutdown notice to all active WS clients.
+// The message format is: {"type":"server_shutdown","ts":unix}
+func BroadcastShutdown() {
+	b, _ := json.Marshal(map[string]any{"type": "server_shutdown", "ts": time.Now().Unix()})
+	wsClientsMu.RLock()
+	conns := make([]*wsConn, 0, len(wsClients))
+	for c := range wsClients {
+		conns = append(conns, c)
+	}
+	wsClientsMu.RUnlock()
+	for _, c := range conns {
+		_ = c.WriteText(b)
 	}
 }

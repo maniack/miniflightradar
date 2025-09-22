@@ -600,3 +600,9 @@ func AllFlightsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(pts)
 }
+
+// HealthHandler returns 200 OK with minimal JSON body for liveness checks.
+func HealthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "ts": time.Now().Unix()})
+}

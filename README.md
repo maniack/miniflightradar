@@ -82,8 +82,11 @@ docker run --rm -p 8080:8080 -v $(pwd)/data:/app/data --name minifr miniflightra
 - GET /api/flights — все текущие точки (тот же формат, что и выше), используется UI для обзора.
 - GET /api/track?callsign=ABC123 — текущий отрезок трека для рейса (JSON: `{callsign, icao24, points: [...]}`).
 - GET /metrics — метрики Prometheus.
-- WS /ws/flights — поток обновлений позиций (диффы) для всех текущих рейсов. Требуются cookies и CSRF (см. раздел Security). Клиент должен передать `?csrf=<значение cookie mfr_csrf>` и отправлять ACK `{"type":"ack","seq":N,"buffered":bytes}`. Сообщения `{"type":"viewport",...}` сервером игнорируются.
-- POST /otel/v1/traces — прокси OTLP/HTTP для фронтенда; сервер пересылает запросы в коллектор, указанный в `--tracing.endpoint`.
+- WS /ws/flights — поток обновлений позиций (диффы) для всех текущих рейсов. Требуются cookies и CSRF (см. раздел Security). Клиент должен передать `?csrf=<значение cookie mfr_csrf>` и отправлять ACK `{"type":"ack","seq":N,"buffered":bytes}`. Поле `trail` (опционально) содержит короткий хвост трека (последние ~24 точки за ~45 минут) для каждого самолёта в upsert.
+  - Сервер периодически отправляет heartbeat‑сообщения `{type:"hb", ts:<unix>}` для поддержания соединения.
+  - При штатном завершении работы сервер отправляет всем WS‑клиентам уведомление `{type:"server_shutdown", ts:<unix>}`.
+- GET /healthz — простой health‑эндпоинт без аутентификации (200 OK + JSON). Предназначен для внешних liveness‑проверок и операторских сценариев; фронтенд для отслеживания доступности использует существующий WebSocket (onopen/onclose + hb).
+- POST /otel/v1/traces — прокси OTLP/HTTP для фронтенда; сервер пересылает запросы в коллектор, указанный в `--tracing.endpoint`. 
 
 ## Наблюдаемость
 

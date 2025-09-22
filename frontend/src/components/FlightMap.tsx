@@ -76,9 +76,13 @@ interface FlightMapProps {
   onFound?: () => void;
   onGeoError?: (message: string) => void;
   onGeoOk?: () => void;
+  // Standardized notifications: backend status propagated to the parent
+  onBackendOffline?: (message: string) => void;
+  onBackendShuttingDown?: (message: string) => void;
+  onBackendOnline?: () => void;
 }
 
-const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign, onNotFound, onFound, onGeoError, onGeoOk }) => {
+const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, baseMode, locateToken = 0, onSelectCallsign, onNotFound, onFound, onGeoError, onGeoOk, onBackendOffline, onBackendShuttingDown, onBackendOnline }) => {
   const mapRef = useRef<OlMap | null>(null);
   const vectorSourceRef = useRef<VectorSource<Feature<Geometry>>>(new VectorSource<Feature<Geometry>>());
   // Source/layer for tracked flight + its track (on top)
@@ -110,6 +114,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
   const animStartRef = useRef<number>(0);
   const animFromRef = useRef<[number, number] | null>(null);
   const animToRef = useRef<[number, number] | null>(null);
+  // Backend connectivity status routing to parent notifications (kept only as ref to debounce)
+  const lastStatusRef = useRef<'online' | 'offline' | 'shutting_down'>('online');
 
   // Queue for centering if map is not yet initialized
   const pendingCenterRef = useRef<{ lon: number; lat: number; zoom: number } | null>(null);
@@ -1014,11 +1020,13 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         const url = `${proto}://${window.location.host}/ws/flights${token ? `?csrf=${encodeURIComponent(token)}` : ''}`;
         const conn = startUISpan('ws.connect', { url, mode: callsign ? 'track' : 'browse' });
         ws = new WebSocket(url);
-        ws.onopen = () => { try { addEvent(conn.span, 'open'); conn.end({ ok: true }); } catch {} ; try { sendViewport(); } catch {} };
+        ws.onopen = () => { try { addEvent(conn.span, 'open'); conn.end({ ok: true }); } catch {}; if (lastStatusRef.current !== 'online') { try { onBackendOnline && onBackendOnline(); } catch {} } lastStatusRef.current = 'online'; try { sendViewport(); } catch {} };
         ws.onmessage = async (ev) => {
           await withSpan('ws.message.batch', async (span) => {
             try {
               const data = JSON.parse(ev.data);
+              if (data && typeof data === 'object' && data.type === 'server_shutdown') { if (lastStatusRef.current !== 'shutting_down') { try { onBackendShuttingDown && onBackendShuttingDown('Server is shutting down…'); } catch {} } lastStatusRef.current = 'shutting_down'; return; }
+              if (data && typeof data === 'object' && data.type === 'hb') { return; }
               // Backward-compat: full array snapshot
               if (Array.isArray(data)) {
                 addEvent(span, 'received', { count: data.length, kind: 'full' });
@@ -1052,11 +1060,13 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         };
         ws.onclose = () => {
           try { addEvent(conn.span, 'close'); } catch {}
+          if (lastStatusRef.current !== 'shutting_down') { try { onBackendOffline && onBackendOffline('Backend unavailable. Trying to reconnect…'); } catch {} ; lastStatusRef.current = 'offline'; }
           if (reconnectTimer) window.clearTimeout(reconnectTimer);
           reconnectTimer = window.setTimeout(() => subscribe(), 2500);
         };
         ws.onerror = () => {
           try { addEvent(conn.span, 'error'); conn.end({ ok: false }); } catch {}
+          if (lastStatusRef.current !== 'shutting_down') { try { onBackendOffline && onBackendOffline('Backend unavailable. Trying to reconnect…'); } catch {}; lastStatusRef.current = 'offline'; }
           try { ws && ws.close(); } catch (_) {}
         };
       } catch (_) {
@@ -1121,6 +1131,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     };
   }, []);
 
+
   // Update marker and track styles when theme changes
   useEffect(() => {
     const f = flightFeatureRef.current;
@@ -1167,7 +1178,11 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     }
   }, [theme]);
 
-  return <div id="map" style={{ position: 'absolute', inset: 0 }}></div>;
+  return (
+    <div style={{ position: 'absolute', inset: 0 }}>
+      <div id="map" style={{ position: 'absolute', inset: 0 }}></div>
+    </div>
+  );
 };
 
 export default FlightMap;
