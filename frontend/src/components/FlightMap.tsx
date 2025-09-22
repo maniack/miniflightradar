@@ -733,7 +733,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
     }
   };
 
-  // Browse mode: show all flights within current viewport when no callsign
+  // Browse mode: show all flights within current viewport over a single persistent WS connection
+  // Variant A: do NOT reconnect WS when callsign changes; filtering by callsign happens only on the frontend.
   useEffect(() => {
     const map = mapRef.current;
     const layer = allLayerRef.current;
@@ -920,8 +921,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
 
-    // Set visibility based on mode
-    layer.setVisible(!callsign);
+    // Set initial visibility; tracking effect will toggle this based on callsign
+    layer.setVisible(true);
 
     // WebSocket subscription for viewport flights
     let ws: WebSocket | null = null;
@@ -936,25 +937,52 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       return `${minX.toFixed(4)},${minY.toFixed(4)},${maxX.toFixed(4)},${maxY.toFixed(4)}`;
     };
 
-    const subscribe = () => {
-      if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+    const sendViewport = () => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const bbox = bboxStr();
       if (!bbox) return;
+      try { ws.send(JSON.stringify({ type: 'viewport', bbox })); } catch {}
+    };
+
+    const subscribe = () => {
+      if (ws) { try { ws.close(); } catch (_) {} ws = null; }
       try {
         const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
         const token = getCsrfTokenFromCookie();
         const url = `${proto}://${window.location.host}/ws/flights${token ? `?csrf=${encodeURIComponent(token)}` : ''}`;
         const conn = startUISpan('ws.connect', { url, mode: callsign ? 'track' : 'browse' });
         ws = new WebSocket(url);
-        ws.onopen = () => { try { addEvent(conn.span, 'open'); conn.end({ ok: true }); } catch {} };
+        ws.onopen = () => { try { addEvent(conn.span, 'open'); conn.end({ ok: true }); } catch {} ; try { sendViewport(); } catch {} };
         ws.onmessage = async (ev) => {
           await withSpan('ws.message.batch', async (span) => {
             try {
-              const pts = JSON.parse(ev.data);
-              if (!Array.isArray(pts)) return;
-              addEvent(span, 'received', { count: pts.length });
-              processPoints(pts);
-              await saveSnapshotNow(pts);
+              const data = JSON.parse(ev.data);
+              // Backward-compat: full array snapshot
+              if (Array.isArray(data)) {
+                addEvent(span, 'received', { count: data.length, kind: 'full' });
+                processPoints(data);
+                await saveSnapshotNow(data);
+                try { ws && ws.send(JSON.stringify({ type: 'ack', seq: 0, buffered: ws.bufferedAmount })); } catch {}
+                return;
+              }
+              if (data && typeof data === 'object' && data.type === 'diff') {
+                const seq = Number(data.seq) || 0;
+                const up: any[] = Array.isArray(data.upsert) ? data.upsert : [];
+                const del: string[] = Array.isArray(data.delete) ? data.delete : [];
+                addEvent(span, 'received', { upsert: up.length, delete: del.length, seq });
+                if (up.length) processPoints(up);
+                if (del.length) {
+                  for (const id of del) {
+                    const feat = allIndexRef.current.get(String(id));
+                    if (feat) {
+                      source.removeFeature(feat);
+                      allIndexRef.current.delete(String(id));
+                    }
+                  }
+                }
+                // Note: we don't persist diffs to snapshot to avoid heavy rebuild each tick
+                try { ws && ws.send(JSON.stringify({ type: 'ack', seq, buffered: ws.bufferedAmount })); } catch {}
+              }
             } catch (e) {
               // ignore parse errors
             }
@@ -974,8 +1002,8 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
       }
     };
 
-    // Set visibility based on mode
-    layer.setVisible(!callsign);
+    // Keep layer visible here; tracking effect manages visibility on callsign changes
+    layer.setVisible(true);
 
     const onMoveEnd = () => {
       try {
@@ -995,7 +1023,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         end();
       } catch {}
       if (resubTimer) window.clearTimeout(resubTimer);
-      resubTimer = window.setTimeout(() => { if (!callsign) subscribe(); }, 300);
+      resubTimer = window.setTimeout(() => { sendViewport(); }, 200);
     };
     map.on('moveend', onMoveEnd);
 
@@ -1025,7 +1053,7 @@ const FlightMap: React.FC<FlightMapProps> = ({ callsign, searchToken, theme, bas
         feat.unset('__animRaf', true);
       }
     };
-  }, [callsign, theme]);
+  }, []);
 
   // Update marker and track styles when theme changes
   useEffect(() => {

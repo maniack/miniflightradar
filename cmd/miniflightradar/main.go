@@ -31,14 +31,14 @@ func main() {
 			},
 			&cli.DurationFlag{
 				Name:    "server.retention",
-				Aliases: []string{"retention"},
+				Aliases: []string{"retention", "r"},
 				Value:   168 * time.Hour,
 				Usage:   "Retention period for flight history (e.g., 168h for one week)",
 				Sources: cli.EnvVars("HISTORY_RETENTION"),
 			},
 			&cli.DurationFlag{
 				Name:    "server.interval",
-				Aliases: []string{"interval"},
+				Aliases: []string{"interval", "i"},
 				Value:   60 * time.Second,
 				Usage:   "Polling interval for OpenSky API (e.g., 10s)",
 				Sources: cli.EnvVars("SERVER_INTERVAL", "INTERVAL"),

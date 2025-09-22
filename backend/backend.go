@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maniack/miniflightradar/monitoring"
@@ -34,6 +35,11 @@ var (
 	proxyOverride string
 	clientMu      sync.Mutex
 	httpClient    *http.Client
+
+	// update broadcast to notify WS writers about new ingested data
+	updatesMu   sync.Mutex
+	updatesSubs = map[chan int64]struct{}{}
+	updatesVer  int64
 )
 
 // SetPollInterval sets the polling interval for OpenSky ingestor (defaults to 10s).
@@ -45,6 +51,44 @@ func SetPollInterval(d time.Duration) {
 
 // GetPollInterval returns current polling interval.
 func GetPollInterval() time.Duration { return pollInterval }
+
+// UpdatesSubscribe subscribes to ingestor update notifications and returns a channel
+// that receives a monotonically increasing version number each time new data is stored.
+// Call the returned unsubscribe to stop receiving and close the channel.
+func UpdatesSubscribe() (ch chan int64, unsubscribe func()) {
+	ch = make(chan int64, 1)
+	updatesMu.Lock()
+	updatesSubs[ch] = struct{}{}
+	// send current version if any
+	v := atomic.LoadInt64(&updatesVer)
+	if v > 0 {
+		select {
+		case ch <- v:
+		default:
+		}
+	}
+	updatesMu.Unlock()
+	return ch, func() {
+		updatesMu.Lock()
+		if _, ok := updatesSubs[ch]; ok {
+			delete(updatesSubs, ch)
+			close(ch)
+		}
+		updatesMu.Unlock()
+	}
+}
+
+func publishUpdate() {
+	v := atomic.AddInt64(&updatesVer, 1)
+	updatesMu.Lock()
+	for ch := range updatesSubs {
+		select {
+		case ch <- v:
+		default:
+		}
+	}
+	updatesMu.Unlock()
+}
 
 // SetProxy sets a CLI-provided proxy URL (overrides environment). Empty disables override.
 func SetProxy(p string) {
@@ -291,6 +335,8 @@ func IngestLoop(stop <-chan struct{}) {
 		if data != nil {
 			_ = storage.Get().UpsertStates(data.States)
 			monitoring.Debugf("ingestor upserted states=%d", len(data.States))
+			// notify subscribers there is fresh data
+			publishUpdate()
 		}
 		d := GetPollInterval()
 		if d <= 0 {
