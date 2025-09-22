@@ -2,10 +2,6 @@
 FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 
-# Optional APM exporter URL for UI (build-time)
-ARG REACT_APP_OTEL_EXPORTER_URL=""
-ENV REACT_APP_OTEL_EXPORTER_URL=${REACT_APP_OTEL_EXPORTER_URL}
-
 # Копируем package.json и package-lock.json
 COPY frontend/package*.json ./
 RUN npm ci
@@ -24,6 +20,9 @@ COPY vendor/ vendor/
 
 # Копируем исходники
 COPY backend/ backend/
+COPY app/ app/
+COPY storage/ storage/
+COPY security/ security/
 COPY ui/ ui/
 COPY cmd/ cmd/
 COPY monitoring/ monitoring/
@@ -31,21 +30,30 @@ COPY monitoring/ monitoring/
 # Копируем собранный фронтенд
 COPY --from=frontend-builder /app/frontend/build ui/build
 
-# Собираем Go бинарник с использованием vendoring
-RUN go build -mod=vendor -o mini-flightradar cmd/miniflightradar/main.go
+# Собираем статический Go бинарник с использованием vendoring
+ENV CGO_ENABLED=0
+RUN go build -trimpath -ldflags "-s -w" -mod=vendor -o mini-flightradar ./cmd/miniflightradar
 
 # === Stage 3: Final image ===
-FROM alpine:3.18
+FROM alpine:3.20
 WORKDIR /app
-
-# Копируем только бинарник (статические файлы фронтенда уже вшиты в него)
-COPY --from=backend-builder /app/mini-flightradar ./
 
 # Устанавливаем CA сертификаты для HTTPS запросов (OpenSky API)
 RUN apk add --no-cache ca-certificates
 
-# Экспонируем порт сервера
+# Создаём директорию данных и пользователя без прав суперпользователя
+RUN adduser -D -H -u 10001 appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
+
+# Копируем только бинарник (статические файлы фронтенда уже вшиты в него)
+COPY --from=backend-builder /app/mini-flightradar ./
+
+# Экспонируем порт сервера и настраиваем том для данных
 EXPOSE 8080
+VOLUME ["/app/data"]
+
+USER 10001:10001
 
 # Команда запуска
 CMD ["./mini-flightradar", "--listen", ":8080"]
