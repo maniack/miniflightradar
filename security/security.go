@@ -193,13 +193,15 @@ func EnsureAuthCookies(w http.ResponseWriter, r *http.Request) {
 	if needNew {
 		uid := randomHex(16)
 		if tok, err := signJWT(uid, 30*24*time.Hour); err == nil {
-			setCookie(w, r, &http.Cookie{Name: "mfr_jwt", Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: int((30 * 24 * time.Hour) / time.Second)})
+			secure := isSecureRequest(r)
+			setCookie(w, r, &http.Cookie{Name: "mfr_jwt", Value: tok, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: int((30 * 24 * time.Hour) / time.Second)})
 		}
 	}
 	// CSRF cookie (create if missing)
 	if _, err := r.Cookie("mfr_csrf"); err != nil {
 		token := randomHex(16)
-		setCookie(w, r, &http.Cookie{Name: "mfr_csrf", Value: token, Path: "/", HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: r.TLS != nil, MaxAge: int((30 * 24 * time.Hour) / time.Second)})
+		secure := isSecureRequest(r)
+		setCookie(w, r, &http.Cookie{Name: "mfr_csrf", Value: token, Path: "/", HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: int((30 * 24 * time.Hour) / time.Second)})
 	}
 }
 
@@ -271,4 +273,28 @@ func SecurityMiddleware(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isSecureRequest reports whether the request is made over HTTPS, including when behind a reverse proxy.
+// It honors standard proxy headers used by nginx/Envoy/Traefik and RFC 7239 Forwarded.
+func isSecureRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	// RFC 7239 Forwarded header may contain proto=https
+	if fwd := r.Header.Get("Forwarded"); fwd != "" {
+		if strings.Contains(strings.ToLower(fwd), "proto=https") {
+			return true
+		}
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		return true
+	}
+	if strings.EqualFold(r.Header.Get("X-Forwarded-Ssl"), "on") {
+		return true
+	}
+	return false
 }

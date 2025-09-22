@@ -129,6 +129,14 @@ docker run --rm -p 8080:8080 -v $(pwd)/data:/app/data --name minifr miniflightra
 
 UI обращается к API/WS на том же хосте/порту.
 
+### Проверки качества и CI
+
+- Локально:
+  - Линтеры: `golangci-lint run` (или `make lint`) — требуется установленный golangci-lint.
+  - Статический анализ: `go vet ./...` (или `make vet`).
+  - Тесты (если будут добавлены): `go test ./...` (или `make test`).
+- CI: в репозитории есть GitHub Actions workflow `.github/workflows/go.yml`, который запускает `go build`, `go vet` и `golangci-lint` на каждом push/PR (ветки main/master). Используется vendoring (`GOFLAGS=-mod=vendor`).
+
 ## Траблшутинг
 
 - Если не видите статику, соберите фронтенд: `make frontend` (в результате появится `ui/build`).

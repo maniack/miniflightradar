@@ -407,10 +407,14 @@ func IngestLoop(stop <-chan struct{}) {
 			return d
 		}
 		if data != nil {
-			_ = storage.Get().UpsertStates(data.States)
-			monitoring.Debugf("ingestor upserted states=%d", len(data.States))
-			// notify subscribers there is fresh data
-			publishUpdate()
+			if s := storage.Get(); s != nil {
+				_ = s.UpsertStates(data.States)
+				monitoring.Debugf("ingestor upserted states=%d", len(data.States))
+				// notify subscribers there is fresh data
+				publishUpdate()
+			} else {
+				monitoring.Debugf("ingestor: storage not initialized; skipping upsert")
+			}
 		}
 		d := GetPollInterval()
 		if d <= 0 {
